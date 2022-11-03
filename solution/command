@@ -1,0 +1,7 @@
+export AICROWD_TESTS_FOLDER=~/debug-example/
+FLATLAND_OVERALL_TIMEOUT=999999 flatland-evaluator --tests ./debug-example/ --shuffle False --disable_timeouts true
+
+export AICROWD_TESTS_FOLDER=~/debug-environments/
+FLATLAND_OVERALL_TIMEOUT=999999 flatland-evaluator --tests ./debug-environments/ --shuffle False --disable_timeouts true
+
+tar -xvf policy_20220614_193806.828878_step548608_name_default.tar -C policy_20220614_193806
