@@ -2,4 +2,4 @@ pybind11
 torch==1.10
 tqdm
 pyyaml
-ffmpeg-python=0.2
+ffmpeg-python==0.2
