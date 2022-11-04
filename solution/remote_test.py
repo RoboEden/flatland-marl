@@ -1,15 +1,11 @@
 import argparse
 import os
-import sys
 import traceback
 from time import sleep
 
 from eval_env import TestEnvWrapper
 from plfActor import Actor
 from utils import VideoWriter, debug_show
-
-PATH = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.dirname(PATH))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--render", "-r", action="store_true", default=False)

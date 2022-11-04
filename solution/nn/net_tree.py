@@ -1,14 +1,9 @@
-import os
-from pathlib import Path
-
 import torch
 import torch.nn as nn
 from impl_config import FeatureParserConfig as fp
 from impl_config import NetworkConfig as ns
 
 from .TreeLSTM import TreeLSTM
-
-CHECKPOINT_PATH = os.path.dirname(Path(__file__).parent.parent.as_posix())
 
 
 class Transformer(nn.Module):

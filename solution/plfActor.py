@@ -1,10 +1,6 @@
-import os
-import sys
 import numpy as np
 import torch
 
-PATH = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.dirname(PATH))
 from nn.net_tree import Network
 
 
@@ -14,6 +10,7 @@ class Actor:
         self.net.load_state_dict(
             torch.load(model_path, map_location=torch.device("cpu"))
         )
+        self.net.eval()
 
     def get_actions(self, obs_list, valid_actions, n_agents):
         # obs = torch.from_numpy(np.array(obs)).float()
