@@ -1,5 +1,5 @@
 import sys
-from subprocess import Popen
+from subprocess import Popen, CalledProcessError
 
 import ffmpeg
 import numpy as np
@@ -45,8 +45,7 @@ class VideoWriter:
         try:
             self.ffmpeg_process.stdin.write(frame.tobytes())
         except:
-            self.print_ffmpeg_output()
-            raise
+            self.check_ffmpeg_returncode()
 
     def close(self):
         """Finish writing the video.
@@ -58,18 +57,26 @@ class VideoWriter:
         if self.ffmpeg_process is None:
             raise ValueError("No frame is written.")
         self.ffmpeg_process.stdin.close()
-        self.ffmpeg_process.wait()
-        if self.ffmpeg_process.returncode != 0:
-            print(
-                f"ffmpeg fails with return code {self.ffmpeg_process.returncode}. See error message blow."
-            )
-            self.print_ffmpeg_output()
-            raise RuntimeError("ffmpeg fails.")
+        self.check_ffmpeg_returncode()
 
     def print_ffmpeg_output(self):
         """Stream ffmpeg's stdout to stdout and its stderr to stderr."""
         sys.stdout.write(self.ffmpeg_process.stdout.read().decode())
         sys.stderr.write(self.ffmpeg_process.stderr.read().decode())
+
+    def check_ffmpeg_returncode(self):
+        """Raise CalledProcessError if the exit code is non-zero."""
+        ffmpeg_process = self.ffmpeg_process
+        ffmpeg_process.wait()
+        if ffmpeg_process.returncode:
+            self.print_ffmpeg_output()
+            print()
+            raise CalledProcessError(
+                ffmpeg_process.returncode,
+                ffmpeg_process.args,
+                ffmpeg_process.stdout,
+                ffmpeg_process.stderr,
+            )
 
     def _pad_frame(self, frame):
         height, width = frame.shape[:2]
@@ -129,12 +136,6 @@ if __name__ == "__main__":
 
     for i in range(256):
         frame = i * np.ones((height, width, 3), dtype=np.uint8)
-        video.write_frame(frame)
+        video.write(frame)
 
     video.close()
-
-
-# "ffmpeg -y -framerate 30 -i " +
-# os.sep.join(["render_video", Test_path, level, "frame_%04d.jpg"]) +
-# " -hide_banner -y " +
-# os.sep.join(["render_video", Test_path, level, "video.mp4"])
