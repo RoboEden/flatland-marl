@@ -73,20 +73,20 @@ class Network(nn.Module):
     # @torchsnooper.snoop()
     def get_embedding(self, agents_attr, forest, adjacency, node_order, edge_order):
         batch_size, n_agents, num_nodes, _ = forest.shape
-        print('agents_attr shape: {}'.format(agents_attr.shape))
-        print('shape of forest: {}'.format(forest.shape))
-        print('shape of adjacency: {}'.format(adjacency.shape))
-        print('node order shape: {}'.format(node_order.shape))
-        print('edge order shape: {}'.format(edge_order.shape))
+        #print('agents_attr shape: {}'.format(agents_attr.shape))
+        #print('shape of forest: {}'.format(forest.shape))
+        #print('shape of adjacency: {}'.format(adjacency.shape))
+        #print('node order shape: {}'.format(node_order.shape))
+        #print('edge order shape: {}'.format(edge_order.shape))
         device = next(self.parameters()).device
         adjacency = self.modify_adjacency(adjacency, device)
-        print('batch size, n_agents, num_nodes: {}, {}, {}'.format(batch_size, n_agents, num_nodes))
+        #print('batch size, n_agents, num_nodes: {}, {}, {}'.format(batch_size, n_agents, num_nodes))
         tree_embedding = self.tree_lstm(forest, adjacency, node_order, edge_order)
-        print('shape of the tree_embedding before flatten: {}'.format(tree_embedding.shape))
+        #print('shape of the tree_embedding before flatten: {}'.format(tree_embedding.shape))
         tree_embedding = tree_embedding.unflatten(0, (batch_size, n_agents, num_nodes))
-        print('shape of the tree embedding after uflatten: {}'.format(tree_embedding.shape))
+        #print('shape of the tree embedding after uflatten: {}'.format(tree_embedding.shape))
         tree_embedding = tree_embedding[:, :, 0, :]
-        print('shape of tree embedding after selection: {}'.format(tree_embedding.shape))
+        #print('shape of tree embedding after selection: {}'.format(tree_embedding.shape))
 
 
         agent_attr_embedding = self.attr_embedding(agents_attr)
@@ -94,7 +94,7 @@ class Network(nn.Module):
 
         ## attention
         att_embedding = self.transformer(embedding)
-        print(f'shape of embedding:{embedding.shape}')
+        #print(f'shape of embedding:{embedding.shape}')
 
         return embedding, att_embedding
         

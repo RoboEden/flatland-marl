@@ -32,6 +32,10 @@ from impl_config import FeatureParserConfig as fp
 
 from solution.nn.net_tree import Network
 
+from solution.utils import VideoWriter, debug_show
+
+from PIL import Image
+import numpy as np
 def parse_args():
     # fmt: off
     parser = argparse.ArgumentParser()
@@ -171,7 +175,7 @@ class Agent(Network):
             dtype=torch.int64
         )
 
-        print('node order after get_features: {}'.format(node_order.shape))
+        #print('node order after get_features: {}'.format(node_order.shape))
         return agents_attr, forest, adjacency, node_order, edge_order
     
     def get_value(self, x):
@@ -180,7 +184,7 @@ class Agent(Network):
         return self.critic(embedding, att_embedding)
 
     def get_action_and_value(self, x, n_agents, actions =None):
-        print(x[0]['agent_attr'])
+        #print(x[0]['agent_attr'])
         agents_attr, forest, adjacency, node_order, edge_order = self.get_feature(x)
         embedding, att_embedding = self.get_embedding(agents_attr, forest, adjacency, node_order, edge_order)
         logits = self.actor(embedding, att_embedding)
@@ -190,18 +194,22 @@ class Agent(Network):
         
         # define distribution over all actions for the moment
         # might be an idea to only do it for the available options
-        print('tpye of logits: {}'.format(type(logits)))
+        #print('tpye of logits: {}'.format(type(logits)))
         probs = Categorical(logits=logits)
-
+        logits = logits.numpy()
         if actions is None:
-            actions = dict()
+            #actions = dict()
+            actions = torch.zeros(n_agents)
             valid_actions = np.array(valid_actions)
             for i in range(n_agents):
                 if n_agents == 1:
                     actions[i] = self._choose_action(valid_actions[i, :], logits)
                 else:
+                    #print(logits[i, :])
                     actions[i] = self._choose_action(valid_actions[i, :], logits[i, :])
-
+                    #print(actions[i])
+        #actions_dict = {handle: action for handle, action in enumerate(actions)}
+        #print('action before return: {}'.format(actions))
         return actions, probs.log_prob(actions), probs.entropy(), self.critic(embedding, att_embedding)
     
     def _choose_action(self, valid_actions, logits, soft_or_hard_max="soft"):
@@ -231,6 +239,15 @@ def observation_to_tensordict(obs, num_agents):
                            'edge_order' : obs[0]['edge_order']},
                           [num_agents])
     return obs_td
+
+def observation_from_tensordict(obs_td, num_agents):
+    obs = dict({
+        'agent_attr' :
+            # convert to dict here
+    })
+
+def actions_to_dict(actions):
+    return {handle: action for handle, action in enumerate(actions)}
 
 if __name__ == "__main__":
     args = parse_args()
@@ -285,17 +302,16 @@ if __name__ == "__main__":
     num_steps = 1000
     num_actions = 5
     observations = TensorDict({'agents_attr' : torch.zeros(num_steps, num_agents, 83),
-                                'node_attr': torch.zeros(num_steps, num_agents, 31, 11),
-                                'adjacency': torch.zeros(num_steps, num_agents, 31, 3),
+                                'node_attr': torch.zeros(num_steps, num_agents, 31, 12),
+                                'adjacency': torch.zeros(num_steps, num_agents, 30, 3),
                                 'node_order': torch.zeros(num_steps, num_agents, 31),
                                 'edge_order': torch.zeros(num_steps, num_agents, 30)}, 
                               batch_size = [num_steps, num_agents])
 
     observations[0]['agents_attr']
-    actions = torch.zeros((num_steps, num_agents))
+    actions_init = torch.zeros((num_steps, num_agents))
     
-    logprobs = torch.zeros((num_steps, num_agents, 
-                            num_actions))
+    logprobs = torch.zeros((num_steps, num_agents))
     
     rewards = torch.zeros((num_steps, num_agents))
     
@@ -304,7 +320,7 @@ if __name__ == "__main__":
     values = torch.zeros((num_steps, num_agents))
     
     rollout_data = TensorDict({'observations' : observations,
-                               'actions' : actions,
+                               'actions' : actions_init,
                                'logprobs' : logprobs,
                                'rewards' : rewards,
                                'dones' : dones,
@@ -321,7 +337,7 @@ if __name__ == "__main__":
     global_step = 0
     start_time = time.time()
     next_obs = env.reset()
-    print('type of next obs: {}'.format(type(next_obs)))
+    #print('type of next obs: {}'.format(type(next_obs)))
     """     next_obs = TensorDict({'agents_attr' : next_obs[0]['agent_attr'],
                            'node_attr': next_obs[0]['forest'],
                            'adjacency' : next_obs[0]['adjacency'],
@@ -329,78 +345,107 @@ if __name__ == "__main__":
                            'edge_order' : next_obs[0]['edge_order']},
                           [num_agents]) """
     #next_obs = observation_to_tensordict(next_obs, num_agents)
-    print(rollout_data[0]['observations'])
+    #print(rollout_data[0]['observations'])
     #print(next_obs['agents_attr'][0])
     
     #next_obs = torch.Tensor(envs.reset()).to(device)
-    next_done = torch.zeros(args.num_envs)
-    
+    #next_done = torch.zeros(args.num_envs)
+    next_done = 0
     num_updates = args.total_timesteps // args.batch_size
 
-    for update in range(1, num_updates + 1):
+    for update in range(1, num_updates +1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
-        for step in range(0, args.num_steps):
+        for step in range(0, num_steps):
             global_step += 1 * args.num_envs
-            rollout_data[step]['observations'] = observation_to_tensordict(next_obs, num_agents)
-            print(rollout_data[step]['observations'])
+            rollout_data['observations'][step] = observation_to_tensordict(next_obs, num_agents)
+            #print(rollout_data['observations'][step])
             #exit()
-            rollout_data[step]['dones'] = next_done
+            rollout_data['dones'][step] = next_done
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs, num_agents)
+                actions, logprob, _, value = agent.get_action_and_value(next_obs, num_agents)
                 #values[step] = value.flatten()
-                rollout_data[step]['values'] = value.flatten()
+                rollout_data['values'][step] = value.flatten()
             #actions[step] = action
             #logprobs[step] = logprob
-            
-            rollout_data[step]['actions'] = action
-            rollout_data[step]['logprobs'] = logprob
-
-            exit()
+            #print('actions before assignment to rollout_data: {}'.format(actions))
+            rollout_data['actions'][step] = actions
+            rollout_data['logprobs'][step] = logprob
+            #print('assigned rollout data actions: {}'.format(rollout_data[step]['actions']))
+            #exit()
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, reward, done, info = envs.step(action.cpu().numpy())
-            rewards[step] = torch.tensor(reward).to(device).view(-1)
-            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
+            #next_obs, reward, done, info = envs.step(action.cpu().numpy())
+            if next_done:
+                next_obs = env.reset()
+                reward = env.env.rewards_dict
+                done = 0
+            else:
+                next_obs, reward, done = env.step(actions_to_dict(actions))
+                done = done['__all__'] # only done if all agents are done
+            
+            #print('done: {}'.format(done))
+            reward = torch.tensor([value for _, value in reward.items()])
+            #done = torch.tensor([value for _, value in done.items()])
+            #print(type(reward))
+            #print(reward)
+            #rewards[step] = torch.tensor(reward).to(device).view(-1)
+            #print('reward at step {}: {}'.format(step, reward))
+            rollout_data['rewards'][step] = reward
+            
+            #next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
+            next_done = done
+            print('current step / done: {} / {}'.format(step, done))
 
-            for item in info:
+            
+            
+            """             for item in info:
                 if "episode" in item.keys():
                     print(f"global_step={global_step}, episodic_return={item['episode']['r']}")
                     writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
-                    break
-
+                    break """
+        #print('actions: {}'.format(rollout_data[12]['actions']))
+        #print(rollout_data['logprobs'])
+        #print('rewards: {}'.format(rewards))
+        # rewards are currently empty 
+        print('average reward: {}'.format(rollout_data['rewards'].mean()))
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
-            advantages = torch.zeros_like(rewards).to(device)
-            lastgaelam = 0
-            for t in reversed(range(args.num_steps)):
+            advantages = torch.zeros_like(rewards)# .to(device)
+            lastgaelam = torch.zeros(num_agents)
+            for t in reversed(range(num_steps)):
                 if t == args.num_steps - 1:
                     nextnonterminal = 1.0 - next_done
                     nextvalues = next_value
                 else:
-                    nextnonterminal = 1.0 - dones[t + 1]
-                    nextvalues = values[t + 1]
-                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
+                    #nextnonterminal = 1.0 - dones[t + 1]
+                    nextnonterminal = 1.0 - rollout_data['dones'][t + 1]
+                    #nextvalues = values[t + 1]
+                    nextvalues = rollout_data['values'][t + 1]
+                #delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
+                #advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                delta = rollout_data['rewards'][t] + args.gamma * nextvalues * nextnonterminal - rollout_data['values'][t]
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
         #print('advantages are:{}'.format(advantages))
         # flatten the batch
-        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
-        b_logprobs = logprobs.reshape(-1)
-        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
-        b_advantages = advantages.reshape(-1)
-        b_returns = returns.reshape(-1)
-        b_values = values.reshape(-1)
+        print('advantages: {}'.format(advantages))
+        #b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
+        #b_logprobs = logprobs.reshape(-1)
+        #b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        #b_advantages = advantages.reshape(-1)
+        #b_returns = returns.reshape(-1)
+        #b_values = values.reshape(-1)
 
         # Optimizing the policy and value network
-        b_inds = np.arange(args.batch_size)
+        b_inds = np.arange(num_steps)
         clipfracs = []
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
@@ -408,6 +453,9 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
+                # here we'll have to convert the obs from the rollout_data back to the just-dict
+                # see if passing actions along for get_action_and_value works
+                # the rest should be fairly similar
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()

@@ -116,9 +116,9 @@ class TreeLSTM(nn.Module):
             #print('child_indexes: {}'.format(child_indexes))
             # child_h and child_c are tensors of size e x 1
             child_h = h[child_indexes, :]
-            print('size of child_h: {}'.format(child_h.shape))
+            #print('size of child_h: {}'.format(child_h.shape))
             child_c = c[child_indexes, :]
-            print('size of child_c: {}'.format(child_c.shape))
+            #print('size of child_c: {}'.format(child_c.shape))
 
             # # Add child hidden states to parent offset locations
             # _, child_counts = torch.unique_consecutive(parent_indexes, return_counts=True)
@@ -130,13 +130,13 @@ class TreeLSTM(nn.Module):
             # h_sum = torch.stack(parent_list)
 
             i_dims = child_h.shape[0] // 3
-            print('i_dims: {}'.format(i_dims))
+            #print('i_dims: {}'.format(i_dims))
             child_h_merge = child_h.unflatten(0, (i_dims, 3)).flatten(start_dim=1)
             #print('child_h_merge_before_flatten: {}'.format(child_h_merge))
             #child_h_merge = child_h_merge.flatten(start_dim=1)
-            print('child h merge dim: {}'.format(child_h_merge.shape))
+            #print('child h merge dim: {}'.format(child_h_merge.shape))
             # h_reduce = self.W_h(child_h_merge)
-            print('x dim: {}'.format(x.shape))
+            #print('x dim: {}'.format(x.shape))
             iou = self.W_iou(x) + self.U_iou(child_h_merge)
 
         # i, o and u are tensors of size n x M
@@ -152,11 +152,11 @@ class TreeLSTM(nn.Module):
             c[node_mask, :] = i * u
         else:
             # f is a tensor of size e x M
-            print('shape of features:{}'.format(features.shape))
-            print('shape of parents indexes: {}'.format(parent_indexes.shape))
-            print('shape of child indexes: {}'.format(child_indexes.shape))
+            #print('shape of features:{}'.format(features.shape))
+            #print('shape of parents indexes: {}'.format(parent_indexes.shape))
+            #print('shape of child indexes: {}'.format(child_indexes.shape))
             f = self.W_f(features[parent_indexes, :]) + self.U_f(child_h)
-            print('shape of f: {}'.format(f.shape))            
+            #print('shape of f: {}'.format(f.shape))            
             f = torch.sigmoid(f)
 
             # fc is a tensor of size e x M
@@ -168,14 +168,14 @@ class TreeLSTM(nn.Module):
 
             # c_sum = torch.stack(parent_list)
             #print('fc before flattening: {}'.format(fc))
-            print('fc_shape before flatten):{}'.format(fc.shape))
+            #print('fc_shape before flatten):{}'.format(fc.shape))
             fc = fc.unflatten(0, (fc.shape[0] // 3, 3)).flatten(start_dim=1) # this is where we must 
-            print('fc_shape after flatten:{}'.format(fc.shape))
+            #print('fc_shape after flatten:{}'.format(fc.shape))
             c_reduce = self.W_c(fc)
 
             c[node_mask, :] = i * u + c_reduce # here we calculate the sum
             #print('vector x: {}'.format(x))
             #print('subset of feature vector: {}'.format(features[parent_indexes, :]))
-            print('size of vector x: {}'.format(x.shape))
-            print('size of subset of feature vector: {}'.format(features[parent_indexes, :].shape))
+            #print('size of vector x: {}'.format(x.shape))
+            #print('size of subset of feature vector: {}'.format(features[parent_indexes, :].shape))
         h[node_mask, :] = o * torch.tanh(c[node_mask])
