@@ -67,7 +67,8 @@ class TestEnvWrapper:
             new_items = np.zeros((max, *shape[1:]))
             new_items[: shape[0], ...] = items
             return new_items
-
+        print('type of feature: {}'.format(type(feature)))
+        print('shape of feature: {}'.format(feature))
         feature_list = {}
         feature_list["agent_attr"] = np.array(feature[0])
         feature_list["forest"] = np.array(feature[1][0])

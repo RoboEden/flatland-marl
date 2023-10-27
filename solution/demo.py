@@ -1,5 +1,6 @@
 from argparse import ArgumentParser
 from time import sleep
+import pandas as pd
 
 from flatland.envs.line_generators import SparseLineGen
 from flatland.envs.malfunction_generators import (
@@ -98,20 +99,36 @@ if __name__ == "__main__":
         model_path = get_model_path(n_agents)
     else:
         model_path = args.model
-    actor = Actor(model_path)
+    actor = Actor(model_path) # load the network weights
     print(f"Load actor from {model_path}")
 
     # create video writer
     if args.save_video is not None:
         video_writer = VideoWriter(args.save_video, args.fps)
 
+    #action_history = []
     # start step loop
     obs = env_wrapper.reset()
+    print('type of observations {}'.format(type(obs)))
+    print('len of observations {}'.format(len(obs)))
+    print('len of observations[0]: {}'.format(len(obs[0])))
+    print((obs[0]['node_order']).shape)
+    print('shape of agent_attr: {}'.format(obs[0]['agent_attr'].shape))
+    print('shape of forest: {}'.format(obs[0]['forest'].shape))
+    print('shape of adjacency: {}'.format(obs[0]['adjacency'].shape)) 
+    print('shape of node order: {}'.format(obs[0]['node_order'].shape)) 
+    print('shape of edge order: {}'.format(obs[0]['edge_order'].shape)) 
     while True:
         va = env_wrapper.get_valid_actions()
         action = actor.get_actions(obs, va, n_agents)
+        #action_history.append(action)
         obs, all_rewards, done = env_wrapper.step(action)
-
+        #print('observations: {}'.format(obs))
+        #print('shape observations[0]: {}'.format(len(obs[0])))
+        #print('shape observations [1][0]: {}'.format(obs[1][0]))
+        #print('shape observations[1][1]: {}'.format(obs[1][1]))
+        #print('shape observations[1][2]: {}'.format(obs[1][2]))
+        #print('shape observations[1][3]: {}'.format(obs[1][3]))
         if args.render:
             debug_show(env_wrapper.env)
             sleep(1 / args.fps)
@@ -130,3 +147,7 @@ if __name__ == "__main__":
             print(f"NORM_REW: {norm_reward:.4f}")
             print(f"ARR_RATIO: {arrival_ratio*100:.2f}%")
             break
+        break
+        
+    #print(pd.DataFrame(action_history).sum(axis = 0))
+    #pd.DataFrame(action_history).to_excel('action_history.xlsx')
