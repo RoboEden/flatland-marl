@@ -240,11 +240,16 @@ def observation_to_tensordict(obs, num_agents):
                           [num_agents])
     return obs_td
 
-def observation_from_tensordict(obs_td, num_agents):
+def observation_from_tensordict(obs_td):
     obs = dict({
-        'agent_attr' :
+        'agent_attr' : obs_td['agents_attr'],
+        'node_attr' : obs_td['node_attr'],
+        'adjacency' : obs_td['adjacency'],
+        'node_order' : obs_td['node_order'],
+        'edge_order' : obs_td['edge_order']
             # convert to dict here
     })
+    return [obs]
 
 def actions_to_dict(actions):
     return {handle: action for handle, action in enumerate(actions)}
@@ -456,7 +461,7 @@ if __name__ == "__main__":
                 # here we'll have to convert the obs from the rollout_data back to the just-dict
                 # see if passing actions along for get_action_and_value works
                 # the rest should be fairly similar
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds])
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(observation_from_tensordict(rollout_data[mb_inds]['observations']), rollout_data[mb_inds]['actions'])
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
