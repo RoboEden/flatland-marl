@@ -26,6 +26,7 @@ from flatland.envs.persistence import RailEnvPersister
 from flatland.envs.rail_env import RailEnv
 from flatland.envs.rail_generators import SparseRailGen
 from flatland_cutils import TreeObsForRailEnv as TreeCutils
+from flatland.envs.step_utils.states import TrainState
 
 from eval_env import LocalTestEnvWrapper
 from impl_config import FeatureParserConfig as fp
@@ -100,7 +101,7 @@ def parse_args():
     return args
 
 def create_random_env():
-    return RailEnv(
+    return custom_reward_rail_env(
         number_of_agents=1,
         width=30,
         height=35,
@@ -257,6 +258,14 @@ def observation_from_tensordict(obs_td):
 
 def actions_to_dict(actions):
     return {handle: action for handle, action in enumerate(actions)}
+
+class custom_reward_rail_env(RailEnv):
+    def update_step_rewards(self, i_agent):
+        agent = self.agents[i_agent]
+        if agent.state == TrainState.DONE:
+            reward = 50
+            self.rewards_dict[i_agent] += reward
+
 
 if __name__ == "__main__":
     args = parse_args()
