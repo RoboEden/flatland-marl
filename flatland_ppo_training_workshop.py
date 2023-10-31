@@ -14,6 +14,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
+import pandas as pd
+from matplotlib import pyplot as plt
 
 from flatland.envs.line_generators import SparseLineGen
 from flatland.envs.malfunction_generators import (
@@ -81,7 +83,7 @@ def parse_args():
         help="Toggles advantages normalization")
     parser.add_argument("--clip-coef", type=float, default=0.2,
         help="the surrogate clipping coefficient")
-    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--ent-coef", type=float, default=0.01,
         help="coefficient of the entropy")
@@ -99,7 +101,7 @@ def parse_args():
 
 def create_random_env():
     return RailEnv(
-        number_of_agents=50,
+        number_of_agents=1,
         width=30,
         height=35,
         rail_generator=SparseRailGen(
@@ -186,11 +188,12 @@ class Agent(Network):
     def get_action_and_value(self, x, n_agents, actions =None):
         #print(x[0]['agent_attr'])
         agents_attr, forest, adjacency, node_order, edge_order = self.get_feature(x)
+        #print(forest.shape)
         embedding, att_embedding = self.get_embedding(agents_attr, forest, adjacency, node_order, edge_order)
         logits = self.actor(embedding, att_embedding)
         logits = logits.squeeze().detach() #.numpy()  
         
-        valid_actions = x[0]['valid_actions']
+        #valid_actions = x[0]['valid_actions']
         
         # define distribution over all actions for the moment
         # might be an idea to only do it for the available options
@@ -198,6 +201,7 @@ class Agent(Network):
         probs = Categorical(logits=logits)
         logits = logits.numpy()
         if actions is None:
+            valid_actions = x[0]['valid_actions']
             #actions = dict()
             actions = torch.zeros(n_agents)
             valid_actions = np.array(valid_actions)
@@ -242,11 +246,11 @@ def observation_to_tensordict(obs, num_agents):
 
 def observation_from_tensordict(obs_td):
     obs = dict({
-        'agent_attr' : obs_td['agents_attr'],
-        'node_attr' : obs_td['node_attr'],
-        'adjacency' : obs_td['adjacency'],
-        'node_order' : obs_td['node_order'],
-        'edge_order' : obs_td['edge_order']
+        'agent_attr' : obs_td['agents_attr'].numpy(),
+        'forest' : obs_td['node_attr'].numpy(),
+        'adjacency' : obs_td['adjacency'].numpy(),
+        'node_order' : obs_td['node_order'].numpy(),
+        'edge_order' : obs_td['edge_order'].numpy()
             # convert to dict here
     })
     return [obs]
@@ -256,6 +260,9 @@ def actions_to_dict(actions):
 
 if __name__ == "__main__":
     args = parse_args()
+    
+    total_rewards = []
+    
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -303,8 +310,8 @@ if __name__ == "__main__":
 
     # ALGO Logic: Storage setup
     #obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
-    num_agents = 50
-    num_steps = 1000
+    num_agents = 1
+    num_steps = args.num_steps
     num_actions = 5
     observations = TensorDict({'agents_attr' : torch.zeros(num_steps, num_agents, 83),
                                 'node_attr': torch.zeros(num_steps, num_agents, 31, 12),
@@ -389,6 +396,10 @@ if __name__ == "__main__":
             if next_done:
                 next_obs = env.reset()
                 reward = env.env.rewards_dict
+                print(type(reward))
+                new_reward = sum([value for _, value in reward.items()])
+                total_rewards.append(new_reward)
+                print(new_reward)
                 done = 0
             else:
                 next_obs, reward, done = env.step(actions_to_dict(actions))
@@ -405,7 +416,7 @@ if __name__ == "__main__":
             
             #next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
             next_done = done
-            print('current step / done: {} / {}'.format(step, done))
+            #print('current step / done: {} / {}'.format(step, done))
 
             
             
@@ -441,7 +452,7 @@ if __name__ == "__main__":
             returns = advantages + values
         #print('advantages are:{}'.format(advantages))
         # flatten the batch
-        print('advantages: {}'.format(advantages))
+        #print('advantages: {}'.format(advantages))
         #b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         #b_logprobs = logprobs.reshape(-1)
         #b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
@@ -461,9 +472,32 @@ if __name__ == "__main__":
                 # here we'll have to convert the obs from the rollout_data back to the just-dict
                 # see if passing actions along for get_action_and_value works
                 # the rest should be fairly similar
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(observation_from_tensordict(rollout_data[mb_inds]['observations']), rollout_data[mb_inds]['actions'])
-                logratio = newlogprob - b_logprobs[mb_inds]
+                
+                # try it with loop
+                
+                updated_rollout_data = TensorDict({
+                    'newlogprob' : torch.zeros(args.minibatch_size, num_agents),
+                    'entropy' : torch.zeros(args.minibatch_size, num_agents),
+                    'newvalue' : torch.zeros(args.minibatch_size, num_agents)
+                }, batch_size = [args.minibatch_size, num_agents])
+                
+                for i, mb_ind in enumerate(mb_inds):
+                    
+                    
+                    _, newlogprob, entropy, newvalue = agent.get_action_and_value(x = observation_from_tensordict(rollout_data[mb_ind]['observations']), 
+                                                                                  n_agents = num_agents,
+                                                                                  actions = rollout_data[mb_ind]['actions'])
+                    #print('shape of newlogprob: {}'.format(newlogprob.shape))
+                    updated_rollout_data['newlogprob'][i] = newlogprob
+                    updated_rollout_data['entropy'][i] = entropy
+                    updated_rollout_data['newvalue'][i] = newvalue
+                
+                #logratio = newlogprob - b_logprobs[mb_inds]
+                #ratio = logratio.exp()
+                logratio = newlogprob - rollout_data['logprobs'][mb_inds]
                 ratio = logratio.exp()
+                #print(ratio.shape) # correct, with shape of minibatch as first dim
+                
 
                 with torch.no_grad():
                     # calculate approx_kl http://joschu.net/blog/kl-approx.html
@@ -471,19 +505,23 @@ if __name__ == "__main__":
                     approx_kl = ((ratio - 1) - logratio).mean()
                     clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
 
-                mb_advantages = b_advantages[mb_inds]
+                mb_advantages = advantages[mb_inds]
                 if args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
+                
+                #print('shape of mb_adv: {}'.format(mb_advantages.shape))
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
                 pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
-                newvalue = newvalue.view(-1)
+                newvalue = updated_rollout_data['newvalue']
                 if args.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+                    # not adapted for flatland yet
+                    #v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+                    v_loss_unclipped = (newvalue)
                     v_clipped = b_values[mb_inds] + torch.clamp(
                         newvalue - b_values[mb_inds],
                         -args.clip_coef,
@@ -493,7 +531,8 @@ if __name__ == "__main__":
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                    v_loss = 0.5 * ((newvalue - returns[mb_inds]) ** 2).mean()
+                    #print('v_loss: {}'.format(v_loss))
 
                 entropy_loss = entropy.mean()
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
@@ -502,11 +541,12 @@ if __name__ == "__main__":
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
+                print('current_loss: {}'.format(loss))
 
             if args.target_kl is not None:
                 if approx_kl > args.target_kl:
                     break
-
+        continue
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
@@ -523,5 +563,9 @@ if __name__ == "__main__":
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-    envs.close()
-    writer.close()
+    #envs.close()
+    #writer.close()
+    reward_df = pd.DataFrame(total_rewards)
+    reward_df.to_csv('rewards_of_training.csv')
+    plt.plot(total_rewards)
+    

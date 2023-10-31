@@ -146,8 +146,8 @@ if __name__ == "__main__":
             print(f"TOTAL_REW: {total_reward}")
             print(f"NORM_REW: {norm_reward:.4f}")
             print(f"ARR_RATIO: {arrival_ratio*100:.2f}%")
-            break
-        break
+            #break
+        #break
         
     #print(pd.DataFrame(action_history).sum(axis = 0))
     #pd.DataFrame(action_history).to_excel('action_history.xlsx')
