@@ -164,3 +164,7 @@ test*
 # code test
 *.ipynb
 *.rdb
+
+# tensorflow runs
+
+./runs

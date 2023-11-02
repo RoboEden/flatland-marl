@@ -62,7 +62,7 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="CartPole-v1",
         help="the id of the environment")
-    parser.add_argument("--total-timesteps", type=int, default=300000,
+    parser.add_argument("--total-timesteps", type=int, default=10000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
@@ -78,17 +78,17 @@ def parse_args():
         help="the lambda for the general advantage estimation")
     parser.add_argument("--num-minibatches", type=int, default=20,
         help="the number of mini-batches")
-    parser.add_argument("--update-epochs", type=int, default=4,
+    parser.add_argument("--update-epochs", type=int, default=2,
         help="the K epochs to update the policy")
     parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles advantages normalization")
     parser.add_argument("--clip-coef", type=float, default=0.2,
         help="the surrogate clipping coefficient")
-    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--ent-coef", type=float, default=0.01,
         help="coefficient of the entropy")
-    parser.add_argument("--vf-coef", type=float, default=0.5,
+    parser.add_argument("--vf-coef", type=float, default=0.01,
         help="coefficient of the value function")
     parser.add_argument("--max-grad-norm", type=float, default=0.5,
         help="the maximum norm for the gradient clipping")
@@ -101,10 +101,12 @@ def parse_args():
     return args
 
 def create_random_env():
-    return custom_reward_rail_env(
+    ''' Create a random railEnv object'''
+    
+    return RailEnv(
         number_of_agents=1,
-        width=30,
-        height=35,
+        width=20,
+        height=25,
         rail_generator=SparseRailGen(
             max_num_cities=3,
             grid_mode=False,
@@ -121,21 +123,6 @@ def create_random_env():
         ),
         obs_builder_object=TreeCutils(fp.num_tree_obs_nodes, fp.tree_pred_path_depth),
     )
-
-
-def make_env(env_id, seed, idx, capture_video, run_name):
-    def thunk():
-        env = gym.make(env_id)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        if capture_video:
-            if idx == 0:
-                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        env.seed(seed)
-        env.action_space.seed(seed)
-        env.observation_space.seed(seed)
-        return env
-
-    return thunk
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -180,6 +167,41 @@ class Agent(Network):
 
         #print('node order after get_features: {}'.format(node_order.shape))
         return agents_attr, forest, adjacency, node_order, edge_order
+    
+    def get_feature_to_td(self, obs_list, num_agents):
+        agents_attr = obs_list[0]["agent_attr"]
+        agents_attr = torch.unsqueeze(torch.from_numpy(agents_attr), axis=0).to(
+            dtype=torch.float32
+        )
+
+        forest = obs_list[0]["forest"]
+        forest = torch.unsqueeze(torch.from_numpy(forest), axis=0).to(
+            dtype=torch.float32
+        )
+
+        adjacency = obs_list[0]["adjacency"]
+        adjacency = torch.unsqueeze(torch.from_numpy(adjacency), axis=0).to(
+            dtype=torch.int64
+        )
+
+        node_order = obs_list[0]["node_order"]
+        node_order = torch.unsqueeze(torch.from_numpy(node_order), axis=0).to(
+            dtype=torch.int64
+        )
+
+        edge_order = obs_list[0]["edge_order"]
+        edge_order = torch.unsqueeze(torch.from_numpy(edge_order), axis=0).to(
+            dtype=torch.int64
+        )
+
+        #print('node order after get_features: {}'.format(node_order.shape))
+        obs_td = TensorDict({'agents_attr' : agents_attr,
+                           'node_attr': forest,
+                           'adjacency' : adjacency,
+                           'node_order' : node_order,
+                           'edge_order' : edge_order},
+                          [num_agents])
+        return obs_td
     
     def get_value(self, x):
         agents_attr, forest, adjacency, node_order, edge_order = self.get_feature(x)
@@ -234,8 +256,8 @@ class Agent(Network):
         else:
             action = valid_actions.nonzero()[0][np.argmax(_logits)]
         return action
-    
-    
+
+
 def observation_to_tensordict(obs, num_agents):
     obs_td = TensorDict({'agents_attr' : obs[0]['agent_attr'],
                            'node_attr': obs[0]['forest'],
@@ -329,15 +351,10 @@ if __name__ == "__main__":
                                 'edge_order': torch.zeros(num_steps, num_agents, 30)}, 
                               batch_size = [num_steps, num_agents])
 
-    observations[0]['agents_attr']
     actions_init = torch.zeros((num_steps, num_agents))
-    
     logprobs = torch.zeros((num_steps, num_agents))
-    
     rewards = torch.zeros((num_steps, num_agents))
-    
     dones = torch.zeros((num_steps))
-    
     values = torch.zeros((num_steps, num_agents))
     
     rollout_data = TensorDict({'observations' : observations,
@@ -358,19 +375,7 @@ if __name__ == "__main__":
     global_step = 0
     start_time = time.time()
     next_obs = env.reset()
-    #print('type of next obs: {}'.format(type(next_obs)))
-    """     next_obs = TensorDict({'agents_attr' : next_obs[0]['agent_attr'],
-                           'node_attr': next_obs[0]['forest'],
-                           'adjacency' : next_obs[0]['adjacency'],
-                           'node_order' : next_obs[0]['node_order'],
-                           'edge_order' : next_obs[0]['edge_order']},
-                          [num_agents]) """
-    #next_obs = observation_to_tensordict(next_obs, num_agents)
-    #print(rollout_data[0]['observations'])
-    #print(next_obs['agents_attr'][0])
-    
-    #next_obs = torch.Tensor(envs.reset()).to(device)
-    #next_done = torch.zeros(args.num_envs)
+
     next_done = 0
     num_updates = args.total_timesteps // args.batch_size
 
@@ -384,8 +389,6 @@ if __name__ == "__main__":
         for step in range(0, num_steps):
             global_step += 1 * args.num_envs
             rollout_data['observations'][step] = observation_to_tensordict(next_obs, num_agents)
-            #print(rollout_data['observations'][step])
-            #exit()
             rollout_data['dones'][step] = next_done
 
             # ALGO LOGIC: action logic
@@ -393,53 +396,33 @@ if __name__ == "__main__":
                 actions, logprob, _, value = agent.get_action_and_value(next_obs, num_agents)
                 #values[step] = value.flatten()
                 rollout_data['values'][step] = value.flatten()
-            #actions[step] = action
-            #logprobs[step] = logprob
-            #print('actions before assignment to rollout_data: {}'.format(actions))
+
             rollout_data['actions'][step] = actions
             rollout_data['logprobs'][step] = logprob
-            #print('assigned rollout data actions: {}'.format(rollout_data[step]['actions']))
-            #exit()
+
             # TRY NOT TO MODIFY: execute the game and log data.
-            #next_obs, reward, done, info = envs.step(action.cpu().numpy())
             if next_done:
                 next_obs = env.reset()
                 reward = env.env.rewards_dict
-                print(type(reward))
                 new_reward = sum([value for _, value in reward.items()])
                 total_rewards.append(new_reward)
-                print(new_reward)
-                done = 0
+                done = False
             else:
                 next_obs, reward, done = env.step(actions_to_dict(actions))
                 done = done['__all__'] # only done if all agents are done
             
-            #print('done: {}'.format(done))
             reward = torch.tensor([value for _, value in reward.items()])
-            #done = torch.tensor([value for _, value in done.items()])
-            #print(type(reward))
-            #print(reward)
-            #rewards[step] = torch.tensor(reward).to(device).view(-1)
-            #print('reward at step {}: {}'.format(step, reward))
             rollout_data['rewards'][step] = reward
-            
-            #next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
             next_done = done
-            #print('current step / done: {} / {}'.format(step, done))
 
-            
-            
             """             for item in info:
                 if "episode" in item.keys():
                     print(f"global_step={global_step}, episodic_return={item['episode']['r']}")
                     writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
                     break """
-        #print('actions: {}'.format(rollout_data[12]['actions']))
-        #print(rollout_data['logprobs'])
-        #print('rewards: {}'.format(rewards))
-        # rewards are currently empty 
-        print('average reward: {}'.format(rollout_data['rewards'].mean()))
+        writer.add_scalar('rewards/min', rollout_data['rewards'].min(), global_step)
+        writer.add_scalar('rewards/mean', rollout_data['rewards'].mean(), global_step)
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -459,15 +442,6 @@ if __name__ == "__main__":
                 delta = rollout_data['rewards'][t] + args.gamma * nextvalues * nextnonterminal - rollout_data['values'][t]
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
-        #print('advantages are:{}'.format(advantages))
-        # flatten the batch
-        #print('advantages: {}'.format(advantages))
-        #b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
-        #b_logprobs = logprobs.reshape(-1)
-        #b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
-        #b_advantages = advantages.reshape(-1)
-        #b_returns = returns.reshape(-1)
-        #b_values = values.reshape(-1)
 
         # Optimizing the policy and value network
         b_inds = np.arange(num_steps)
@@ -477,12 +451,6 @@ if __name__ == "__main__":
             for start in range(0, args.batch_size, args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
-
-                # here we'll have to convert the obs from the rollout_data back to the just-dict
-                # see if passing actions along for get_action_and_value works
-                # the rest should be fairly similar
-                
-                # try it with loop
                 
                 updated_rollout_data = TensorDict({
                     'newlogprob' : torch.zeros(args.minibatch_size, num_agents),
@@ -491,22 +459,16 @@ if __name__ == "__main__":
                 }, batch_size = [args.minibatch_size, num_agents])
                 
                 for i, mb_ind in enumerate(mb_inds):
-                    
-                    
                     _, newlogprob, entropy, newvalue = agent.get_action_and_value(x = observation_from_tensordict(rollout_data[mb_ind]['observations']), 
                                                                                   n_agents = num_agents,
                                                                                   actions = rollout_data[mb_ind]['actions'])
-                    #print('shape of newlogprob: {}'.format(newlogprob.shape))
                     updated_rollout_data['newlogprob'][i] = newlogprob
                     updated_rollout_data['entropy'][i] = entropy
                     updated_rollout_data['newvalue'][i] = newvalue
                 
-                #logratio = newlogprob - b_logprobs[mb_inds]
-                #ratio = logratio.exp()
-                logratio = newlogprob - rollout_data['logprobs'][mb_inds]
+                logratio = updated_rollout_data['newlogprob'] - rollout_data['logprobs'][mb_inds]
                 ratio = logratio.exp()
-                #print(ratio.shape) # correct, with shape of minibatch as first dim
-                
+             
 
                 with torch.no_grad():
                     # calculate approx_kl http://joschu.net/blog/kl-approx.html
@@ -518,8 +480,6 @@ if __name__ == "__main__":
                 if args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
-                
-                #print('shape of mb_adv: {}'.format(mb_advantages.shape))
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
                 pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
@@ -529,14 +489,13 @@ if __name__ == "__main__":
                 newvalue = updated_rollout_data['newvalue']
                 if args.clip_vloss:
                     # not adapted for flatland yet
-                    #v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_loss_unclipped = (newvalue)
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
+                    v_loss_unclipped = (newvalue - returns[mb_inds]) ** 2
+                    v_clipped = rollout_data['values'][mb_inds] + torch.clamp(
+                        newvalue - rollout_data['values'][mb_inds],
                         -args.clip_coef,
                         args.clip_coef,
                     )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                    v_loss_clipped = (v_clipped - returns[mb_inds]) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
@@ -555,26 +514,26 @@ if __name__ == "__main__":
             if args.target_kl is not None:
                 if approx_kl > args.target_kl:
                     break
-        continue
-        y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
-        var_y = np.var(y_true)
-        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+
+        #y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
+        #var_y = np.var(y_true)
+        #explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
-        writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-        writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-        writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        #writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
+        #writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
+        #writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
+        #writer.add_scalar("losses/explained_variance", explained_var, global_step)
+        #print("SPS:", int(global_step / (time.time() - start_time)))
+        #writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
     #envs.close()
-    #writer.close()
-    reward_df = pd.DataFrame(total_rewards)
-    reward_df.to_csv('rewards_of_training.csv')
-    plt.plot(total_rewards)
+    writer.close()
+    #reward_df = pd.DataFrame(total_rewards)
+    #reward_df.to_csv('rewards_of_training.csv')
+    #plt.plot(total_rewards)
     
