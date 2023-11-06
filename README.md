@@ -1,3 +1,28 @@
+# Notes Modifications Emanuel
+
+## Installation
+
+The poetry set-up should take care of most things, including creating a new virtual environment. Installation needs to be done in WSL, as the c-utils cannot be installed otherwise. Clone the repository and initialize it by running
+
+```shell
+poetry install
+```
+
+The installation of the C-utils obersvation generator does not work via poetry, therefore you have to run it manually with
+
+```shell
+poetry run pip install ./flatland_cutils
+```
+
+## Running demo
+
+Change the current directory to ./solutions.
+Run the demo script. 
+
+## Running the training
+
+Run tree_lstm_ppo_training_workshop.py script, setting any any runtime arguments as desired.
+
 # Flatland-MARL
 This is a multi-agent reinforcement learning solution to [Flatland3 challenge](https://www.aicrowd.com/challenges/flatland-3). The solution itself is elaborated on in our paper. 
 

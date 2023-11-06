@@ -100,12 +100,16 @@ def parse_args():
     # fmt: on
     return args
 
+num_agents = 1
+
 def create_random_env():
-    ''' Create a random railEnv object'''
+    ''' Create a random railEnv object
+        Taken from the flatland-marl demo
+    '''
     
     return RailEnv(
-        number_of_agents=1,
-        width=20,
+        number_of_agents=num_agents,
+        width=20, # try smaller environment for hopefully faster learning
         height=25,
         rail_generator=SparseRailGen(
             max_num_cities=3,
@@ -126,19 +130,22 @@ def create_random_env():
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    ''' Initialize layers orthogonally
+    Used in the CleanRL PPO version, not used yet in this script.
+    '''
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    nn.init.orthogonal_(layer.weight, std)
-    nn.init.constant_(layer.bias, bias_const)
-    return layer
-
-
-
 class Agent(Network):
+    '''Class for the neural network we want to train. Inherits from the original neural network.
     
+    Methods:
+    get_feature
+    get_feature_to_td
+    get_value
+    get_action_and_value
+    _choose_action'''
     def get_feature(self, obs_list):
         agents_attr = obs_list[0]["agent_attr"]
         agents_attr = torch.unsqueeze(torch.from_numpy(agents_attr), axis=0).to(
@@ -259,6 +266,7 @@ class Agent(Network):
 
 
 def observation_to_tensordict(obs, num_agents):
+    '''Returns a tensordict containings the entries of obs'''
     obs_td = TensorDict({'agents_attr' : obs[0]['agent_attr'],
                            'node_attr': obs[0]['forest'],
                            'adjacency' : obs[0]['adjacency'],
@@ -268,6 +276,7 @@ def observation_to_tensordict(obs, num_agents):
     return obs_td
 
 def observation_from_tensordict(obs_td):
+    '''Returns a list containing a dict of the entries in obs_td'''
     obs = dict({
         'agent_attr' : obs_td['agents_attr'].numpy(),
         'forest' : obs_td['node_attr'].numpy(),
@@ -279,9 +288,11 @@ def observation_from_tensordict(obs_td):
     return [obs]
 
 def actions_to_dict(actions):
+    '''Returns a dict of the actions for actions given as tensor'''
     return {handle: action for handle, action in enumerate(actions)}
 
 class custom_reward_rail_env(RailEnv):
+    '''Draft for custom reward function, not yet working'''
     def update_step_rewards(self, i_agent):
         agent = self.agents[i_agent]
         if agent.state == TrainState.DONE:
@@ -326,9 +337,7 @@ if __name__ == "__main__":
     #    [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
     #)
     
-    #envs = [create_random_env()]
     env = create_random_env()
-    #envs = [LocalTestEnvWrapper(env) for env in envs]
     env = LocalTestEnvWrapper(env)
     # just create one flatland env here, don't bother with sync vector env
     #assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
@@ -341,7 +350,6 @@ if __name__ == "__main__":
 
     # ALGO Logic: Storage setup
     #obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
-    num_agents = 1
     num_steps = args.num_steps
     num_actions = 5
     observations = TensorDict({'agents_attr' : torch.zeros(num_steps, num_agents, 83),
@@ -388,7 +396,9 @@ if __name__ == "__main__":
 
         for step in range(0, num_steps):
             global_step += 1 * args.num_envs
-            rollout_data['observations'][step] = observation_to_tensordict(next_obs, num_agents)
+            # currently we still change between tensordict and non-tensordict representation of data
+            # goal will be to get it all to tensordict, possibly define network as tensormodule
+            rollout_data['observations'][step] = observation_to_tensordict(next_obs, num_agents) 
             rollout_data['dones'][step] = next_done
 
             # ALGO LOGIC: action logic
@@ -400,12 +410,11 @@ if __name__ == "__main__":
             rollout_data['actions'][step] = actions
             rollout_data['logprobs'][step] = logprob
 
-            # TRY NOT TO MODIFY: execute the game and log data.
+            # manually reset the environment if it is done
+            # currently we only train for one specific track layout
             if next_done:
                 next_obs = env.reset()
                 reward = env.env.rewards_dict
-                new_reward = sum([value for _, value in reward.items()])
-                total_rewards.append(new_reward)
                 done = False
             else:
                 next_obs, reward, done = env.step(actions_to_dict(actions))
@@ -423,7 +432,8 @@ if __name__ == "__main__":
                     break """
         writer.add_scalar('rewards/min', rollout_data['rewards'].min(), global_step)
         writer.add_scalar('rewards/mean', rollout_data['rewards'].mean(), global_step)
-        # bootstrap value if not done
+
+        # Calculate advantages
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
             advantages = torch.zeros_like(rewards)# .to(device)
@@ -458,6 +468,8 @@ if __name__ == "__main__":
                     'newvalue' : torch.zeros(args.minibatch_size, num_agents)
                 }, batch_size = [args.minibatch_size, num_agents])
                 
+                # get the logprob, entropy and value for current network
+                # probably there is a prettier way to do this
                 for i, mb_ind in enumerate(mb_inds):
                     _, newlogprob, entropy, newvalue = agent.get_action_and_value(x = observation_from_tensordict(rollout_data[mb_ind]['observations']), 
                                                                                   n_agents = num_agents,
@@ -468,7 +480,8 @@ if __name__ == "__main__":
                 
                 logratio = updated_rollout_data['newlogprob'] - rollout_data['logprobs'][mb_inds]
                 ratio = logratio.exp()
-             
+                #print('ration: {}'.format(ratio))
+                #print('ratio shape: {}'.format(ratio.shape))
 
                 with torch.no_grad():
                     # calculate approx_kl http://joschu.net/blog/kl-approx.html
@@ -502,7 +515,7 @@ if __name__ == "__main__":
                     v_loss = 0.5 * ((newvalue - returns[mb_inds]) ** 2).mean()
                     #print('v_loss: {}'.format(v_loss))
 
-                entropy_loss = entropy.mean()
+                entropy_loss = updated_rollout_data['entropy'].mean()
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
                 optimizer.zero_grad()

@@ -11,7 +11,7 @@ python = "^3.10"
 pybind11 = "^2.11.1"
 torch = "^2.1.0"
 tqdm = "^4.66.1"
-PyYAML = "^6.0.1"
+PyYAML = "^6.0no.1"
 ffmpeg-python = "^0.2.0"
 tensordict = "^0.2.1"
 flatland-rl = {path = "flatland-rl"}
