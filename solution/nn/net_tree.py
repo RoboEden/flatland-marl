@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from impl_config import FeatureParserConfig as fp
 from impl_config import NetworkConfig as ns
+from tensordict.tensordict import TensorDict
+from torch.distributions.categorical import Categorical
 
 from .TreeLSTM import TreeLSTM
 
@@ -31,14 +33,14 @@ class Transformer(nn.Module):
         return output
 
 
-class Network(nn.Module):
+class Network_td(nn.Module):
     """
     Feature:  cat(agents_attr_embedding, tree_embedding)
     structure: mlp
     """
 
     def __init__(self):
-        super(Network, self).__init__()
+        super(Network_td, self).__init__()
         self.tree_lstm = TreeLSTM(fp.node_sz, ns.tree_embedding_sz)
         self.attr_embedding = nn.Sequential(
             nn.Linear(fp.agent_attr, 2 * ns.hidden_sz),
@@ -71,7 +73,7 @@ class Network(nn.Module):
         )
 
     # @torchsnooper.snoop()
-    def get_embedding(self, agents_attr, forest, adjacency, node_order, edge_order):
+    def get_embedding(input_td): #get_embedding(self, agents_attr, forest, adjacency, node_order, edge_order):
         batch_size, n_agents, num_nodes, _ = forest.shape
         #print('agents_attr shape: {}'.format(agents_attr.shape))
         #print('shape of forest: {}'.format(forest.shape))
@@ -97,15 +99,86 @@ class Network(nn.Module):
         #print(f'shape of embedding:{embedding.shape}')
 
         return embedding, att_embedding
+    
+    def forward(self, obs_td, actions):
+        #agents_attr, forest, adjacency, node_order, edge_order
+        #print('shape of node attr: {}'.format(obs_td['node_attr'].shape))
+        batch_size, n_agents, num_nodes, _ = obs_td['node_attr'].shape
+        device = next(self.parameters()).device
+        adjacency = self.modify_adjacency(obs_td['adjacency'], device)
+        #print('node order before tree call: {}'.format(obs_td['node_order']))
+        tree_embedding = self.tree_lstm(obs_td['node_attr'], 
+                                        adjacency, 
+                                        obs_td['node_order'], 
+                                        obs_td['edge_order'])
+        tree_embedding = tree_embedding.unflatten(0, (batch_size, n_agents, num_nodes))
+        tree_embedding = tree_embedding[:, :, 0, :]
+
+        agent_attr_embedding = self.attr_embedding(obs_td['agents_attr'])
+        embedding = torch.cat([agent_attr_embedding, tree_embedding], dim=2)
+
+        ## attention
+        att_embedding = self.transformer(embedding)
+        #print(f'shape of embedding:{embedding.shape}')
         
-    def forward(self, agents_attr, forest, adjacency, node_order, edge_order):
+        
+        #embedding_td = self.get_embedding(obs_td)
+        logits = self.actor(embedding, att_embedding)
+        logits = logits.squeeze().detach() #.numpy()  
+        
+        #valid_actions = x[0]['valid_actions']
+        
+        # define distribution over all actions for the moment
+        # might be an idea to only do it for the available options
+        #print('tpye of logits: {}'.format(type(logits)))
+        probs = Categorical(logits=logits)
+        #logits = logits.numpy()
+        if not torch.count_nonzero(actions): # check if we already assigned actions or need to draw
+            valid_actions = obs_td['valid_actions']
+            #actions = dict()
+            #print('valid_actions: {}'.format(valid_actions))
+            probs_valid_actions = probs.probs
+            probs_valid_actions = torch.reshape(probs_valid_actions, valid_actions.shape)
+            #print('probs valid actions: {}'.format(probs_valid_actions))
+            probs_valid_actions[~valid_actions] = 0
+            #print('probs valid actions: {}'.format(probs_valid_actions))
+            #print('probs valid actions withzeros: {}'.format(probs_valid_actions))
+            probs_valid_actions = Categorical(probs = probs_valid_actions)
+            actions = probs_valid_actions.sample()       
+            #print('sampled actions: {}'.format(actions))
+            """             valid_actions = np.array(valid_actions)
+            for i in range(n_agents):
+                if n_agents == 1:
+                    actions[i] = self._choose_action(valid_actions[i, :], logits)
+                else:
+                    #print(logits[i, :])
+                    actions[i] = self._choose_action(valid_actions[i, :], logits[i, :]) """
+                    #print(actions[i])
+        #actions_dict = {handle: action for handle, action in enumerate(actions)}
+        #print('action before return: {}'.format(actions))
+        #actions = torch.tensor(actions, dtype = torch.int64)
+        actions.type(torch.int64)
+        logprobs = torch.tensor(probs.log_prob(actions), dtype = torch.float32)
+        entropy = probs.entropy().type(torch.float32).reshape(batch_size)
+        values = self.critic(embedding, att_embedding).type(torch.float32)
+        #print('got to before assigning td')
+        td_out = TensorDict({'actions': actions, 'logprobs' : logprobs, 'entropy' : entropy,'values' : values}, batch_size= [])
+        #print('after assigning td')
+        #print('actions shape: {}'.format(actions.shape))
+        #print('logprobs shape: {}'.format(logprobs.shape))
+        #print('entropy shape: {}'.format(entropy.shape))
+        #print('values shape: {}'.format(values.shape))
+        return actions, logprobs, entropy, values
+        #return self.actor(embedding, att_embedding), self.critic(embedding, att_embedding)
+        
+    """     def forward(self, agents_attr, forest, adjacency, node_order, edge_order):
         batch_size, n_agents, num_nodes, _ = forest.shape
         device = next(self.parameters()).device
         embedding, att_embedding = self.get_embedding(agents_attr, forest, adjacency, node_order, edge_order)
         worker_action = torch.zeros((batch_size, n_agents, 5), device=device)
         worker_action[:, :n_agents, :] = self.actor(embedding, att_embedding)
         critic_value = self.critic(embedding, att_embedding)
-        return [worker_action], critic_value  # (batch size, 1)
+        return [worker_action], critic_value  # (batch size, 1) """
     
     def actor(self, embedding, att_embedding):
         worker_action = torch.cat([embedding, att_embedding], dim=-1)

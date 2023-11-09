@@ -6,6 +6,7 @@ import time
 from distutils.util import strtobool
 
 from tensordict.tensordict import TensorDict
+from tensordict.nn import TensorDictModule
 
 import gym
 import numpy as np
@@ -28,12 +29,16 @@ from flatland.envs.rail_generators import SparseRailGen
 from flatland_cutils import TreeObsForRailEnv as TreeCutils
 from flatland.envs.step_utils.states import TrainState
 
+import PIL
+from flatland.utils.rendertools import RenderTool, AgentRenderVariant
+from IPython.display import clear_output
+
 from eval_env import LocalTestEnvWrapper
 from impl_config import FeatureParserConfig as fp
 #from plfActor import Actor
 #from utils import VideoWriter, debug_show
 
-from solution.nn.net_tree import Network
+from solution.nn.net_tree import Network_td
 
 from solution.utils import VideoWriter, debug_show
 
@@ -62,7 +67,7 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="CartPole-v1",
         help="the id of the environment")
-    parser.add_argument("--total-timesteps", type=int, default=10000,
+    parser.add_argument("--total-timesteps", type=int, default=100000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
@@ -78,7 +83,7 @@ def parse_args():
         help="the lambda for the general advantage estimation")
     parser.add_argument("--num-minibatches", type=int, default=20,
         help="the number of mini-batches")
-    parser.add_argument("--update-epochs", type=int, default=2,
+    parser.add_argument("--update-epochs", type=int, default=4,
         help="the K epochs to update the policy")
     parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles advantages normalization")
@@ -102,15 +107,57 @@ def parse_args():
 
 num_agents = 1
 
+class RailEnv_td(RailEnv):
+    def obs_to_td(self, observations):
+        #print('dim of node attr at output of env: {}'.format(torch.tensor(observations[1][0]).unsqueeze(0).shape))
+        obs_td = TensorDict({
+            'agents_attr' : torch.tensor(observations[0], dtype = torch.float32),#.unsqueeze(0),
+            'node_attr' : torch.tensor(observations[1][0], dtype = torch.float32),#.unsqueeze(0),
+            'adjacency' : torch.tensor(observations[1][1], dtype = torch.int64),#.unsqueeze(0),
+            'node_order' : torch.tensor(observations[1][2], dtype = torch.int64),#.unsqueeze(0),
+            'edge_order' : torch.tensor(observations[1][3], dtype = torch.int64),#.unsqueeze(0)
+        },
+        [self.get_num_agents()])
+        return obs_td
+    
+    def reset(self, tensordict = None):
+        observations, info = super().reset()
+        #print('node order from env: {}'.format(observations[1][2]))
+        if tensordict is None:
+            tensordict_out = TensorDict({}, batch_size = [])
+        tensordict_out['observations'] = self.obs_to_td(observations)
+        #print('node_order after obs parsing: {}'.format(tensordict_out['observations']['node_order']))
+        env_config, agents_properties, valid_actions = self.obs_builder.get_properties()
+        #print('valid actions: {}'.format(torch.Tensor(valid_actions)))
+        tensordict_out['observations']['valid_actions'] = torch.tensor(valid_actions, dtype = torch.bool)#.unsqueeze(0)
+        tensordict_out['done'] =  torch.tensor(False).type(torch.bool)
+        return tensordict_out
+    
+    def step(self, tensordict):
+        #print('doing step')
+        actions = {handle: action.item() for handle, action in enumerate(tensordict['actions'])}
+        #print('action dict passed to env: {}'.format(actions))
+        observations, rewards, done, info = super().step(actions)
+        env_config, agents_properties, valid_actions = self.obs_builder.get_properties()
+        #print('valid actions from env: {}'.format(valid_actions))
+        tensordict_out = TensorDict({}, batch_size = [])
+        tensordict_out['observations'] = self.obs_to_td(observations)
+        tensordict_out['rewards'] = torch.tensor([value for _, value in rewards.items()])
+        #tensordict_out['done'] =  torch.tensor([value for _, value in done.items()][:-1])
+        tensordict_out['done'] =  torch.tensor(done['__all__']).type(torch.bool)
+        tensordict_out['observations']['valid_actions'] = torch.tensor(valid_actions, dtype = torch.bool)
+        return tensordict_out
+
+
 def create_random_env():
     ''' Create a random railEnv object
         Taken from the flatland-marl demo
     '''
     
-    return RailEnv(
+    return RailEnv_td(
         number_of_agents=num_agents,
-        width=20, # try smaller environment for hopefully faster learning
-        height=25,
+        width=30, # try smaller environment for hopefully faster learning
+        height=35,
         rail_generator=SparseRailGen(
             max_num_cities=3,
             grid_mode=False,
@@ -128,7 +175,6 @@ def create_random_env():
         obs_builder_object=TreeCutils(fp.num_tree_obs_nodes, fp.tree_pred_path_depth),
     )
 
-
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     ''' Initialize layers orthogonally
     Used in the CleanRL PPO version, not used yet in this script.
@@ -137,7 +183,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class Agent(Network):
+""" class Agent(Network):
     '''Class for the neural network we want to train. Inherits from the original neural network.
     
     Methods:
@@ -146,81 +192,18 @@ class Agent(Network):
     get_value
     get_action_and_value
     _choose_action'''
-    def get_feature(self, obs_list):
-        agents_attr = obs_list[0]["agent_attr"]
-        agents_attr = torch.unsqueeze(torch.from_numpy(agents_attr), axis=0).to(
-            dtype=torch.float32
-        )
+    def __init__(self, network):
+        self.td_network = TensorDictModule(network, in_keys = ['observations', 'actions'], 
+                                           out_keys = ["actions", 'log_probs', 'entropy', "value"]) 
+       
+    def get_value(self, obs_td):
+        #agents_attr, forest, adjacency, node_order, edge_order = self.get_feature(x)
+        embedding_td = self.get_embedding(obs_td)
+        return self.critic(embedding_td)
 
-        forest = obs_list[0]["forest"]
-        forest = torch.unsqueeze(torch.from_numpy(forest), axis=0).to(
-            dtype=torch.float32
-        )
-
-        adjacency = obs_list[0]["adjacency"]
-        adjacency = torch.unsqueeze(torch.from_numpy(adjacency), axis=0).to(
-            dtype=torch.int64
-        )
-
-        node_order = obs_list[0]["node_order"]
-        node_order = torch.unsqueeze(torch.from_numpy(node_order), axis=0).to(
-            dtype=torch.int64
-        )
-
-        edge_order = obs_list[0]["edge_order"]
-        edge_order = torch.unsqueeze(torch.from_numpy(edge_order), axis=0).to(
-            dtype=torch.int64
-        )
-
-        #print('node order after get_features: {}'.format(node_order.shape))
-        return agents_attr, forest, adjacency, node_order, edge_order
-    
-    def get_feature_to_td(self, obs_list, num_agents):
-        agents_attr = obs_list[0]["agent_attr"]
-        agents_attr = torch.unsqueeze(torch.from_numpy(agents_attr), axis=0).to(
-            dtype=torch.float32
-        )
-
-        forest = obs_list[0]["forest"]
-        forest = torch.unsqueeze(torch.from_numpy(forest), axis=0).to(
-            dtype=torch.float32
-        )
-
-        adjacency = obs_list[0]["adjacency"]
-        adjacency = torch.unsqueeze(torch.from_numpy(adjacency), axis=0).to(
-            dtype=torch.int64
-        )
-
-        node_order = obs_list[0]["node_order"]
-        node_order = torch.unsqueeze(torch.from_numpy(node_order), axis=0).to(
-            dtype=torch.int64
-        )
-
-        edge_order = obs_list[0]["edge_order"]
-        edge_order = torch.unsqueeze(torch.from_numpy(edge_order), axis=0).to(
-            dtype=torch.int64
-        )
-
-        #print('node order after get_features: {}'.format(node_order.shape))
-        obs_td = TensorDict({'agents_attr' : agents_attr,
-                           'node_attr': forest,
-                           'adjacency' : adjacency,
-                           'node_order' : node_order,
-                           'edge_order' : edge_order},
-                          [num_agents])
-        return obs_td
-    
-    def get_value(self, x):
-        agents_attr, forest, adjacency, node_order, edge_order = self.get_feature(x)
-        embedding, att_embedding = self.get_embedding(agents_attr, forest, adjacency, node_order, edge_order)
-        return self.critic(embedding, att_embedding)
-
-    def get_action_and_value(self, x, n_agents, actions =None):
-        #print(x[0]['agent_attr'])
-        agents_attr, forest, adjacency, node_order, edge_order = self.get_feature(x)
-        #print(forest.shape)
-        embedding, att_embedding = self.get_embedding(agents_attr, forest, adjacency, node_order, edge_order)
-        logits = self.actor(embedding, att_embedding)
+    def forward(self, obs_td, actions =None):
+        embedding_td = self.get_embedding(obs_td)
+        logits = self.actor(embedding_td)
         logits = logits.squeeze().detach() #.numpy()  
         
         #valid_actions = x[0]['valid_actions']
@@ -262,8 +245,7 @@ class Agent(Network):
             action = np.random.choice(valid_actions.nonzero()[0], p=_logits)
         else:
             action = valid_actions.nonzero()[0][np.argmax(_logits)]
-        return action
-
+        return action """
 
 def observation_to_tensordict(obs, num_agents):
     '''Returns a tensordict containings the entries of obs'''
@@ -331,62 +313,67 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-
+    print('device: {}'.format(device))
     # env setup
     #envs = gym.vector.SyncVectorEnv(
     #    [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
     #)
     
     env = create_random_env()
-    env = LocalTestEnvWrapper(env)
+    env_renderer = RenderTool(env,
+                              agent_render_variant=AgentRenderVariant.ONE_STEP_BEHIND,
+                              show_debug=False,
+                              screen_height=600,  # Adjust these parameters to fit your resolution
+                              screen_width=800)
+
+
     # just create one flatland env here, don't bother with sync vector env
     #assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     #agent = Agent(envs).to(device)
     #optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    agent = Agent()
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    agent = Network_td()
+    td_module = TensorDictModule(Network_td(), in_keys = ['observations', 'actions'], out_keys = ['actions', 'logprobs', 'entropy', 'values']).to(device)
+
+    optimizer = optim.Adam(td_module.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
     #obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     num_steps = args.num_steps
     num_actions = 5
-    observations = TensorDict({'agents_attr' : torch.zeros(num_steps, num_agents, 83),
-                                'node_attr': torch.zeros(num_steps, num_agents, 31, 12),
-                                'adjacency': torch.zeros(num_steps, num_agents, 30, 3),
-                                'node_order': torch.zeros(num_steps, num_agents, 31),
-                                'edge_order': torch.zeros(num_steps, num_agents, 30)}, 
+    observations = TensorDict({'agents_attr' : torch.zeros(num_steps, num_agents, 83, dtype = torch.float32),
+                                'node_attr': torch.zeros(num_steps, num_agents, 31, 12, dtype = torch.float32),
+                                'adjacency': torch.zeros(num_steps, num_agents, 30, 3, dtype = torch.int64),
+                                'node_order': torch.zeros(num_steps, num_agents, 31, dtype = torch.int64),
+                                'edge_order': torch.zeros(num_steps, num_agents, 30, dtype = torch.int64),
+                                'valid_actions' : torch.zeros(num_steps, num_agents, num_actions, dtype = torch.bool)}, 
                               batch_size = [num_steps, num_agents])
 
-    actions_init = torch.zeros((num_steps, num_agents))
-    logprobs = torch.zeros((num_steps, num_agents))
-    rewards = torch.zeros((num_steps, num_agents))
-    dones = torch.zeros((num_steps))
+    actions_init = torch.zeros((num_steps, num_agents), dtype = torch.int64)
+    logprobs = torch.zeros((num_steps, num_agents), dtype = torch.float32)
+    rewards = torch.zeros((num_steps, num_agents), dtype = torch.float32)
+    done = torch.zeros((num_steps), dtype = torch.bool)
     values = torch.zeros((num_steps, num_agents))
     
     rollout_data = TensorDict({'observations' : observations,
                                'actions' : actions_init,
                                'logprobs' : logprobs,
                                'rewards' : rewards,
-                               'dones' : dones,
+                               'done' : done,
                                'values' : values},
                               batch_size = [num_steps])
-    #actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
-    #logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    #rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    #dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    #values = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    
-
+  
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
     next_obs = env.reset()
+    rollout_data = rollout_data.to(device)
 
-    next_done = 0
+
+    #next_done = False
     num_updates = args.total_timesteps // args.batch_size
-
+    
     for update in range(1, num_updates +1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -398,31 +385,42 @@ if __name__ == "__main__":
             global_step += 1 * args.num_envs
             # currently we still change between tensordict and non-tensordict representation of data
             # goal will be to get it all to tensordict, possibly define network as tensormodule
-            rollout_data['observations'][step] = observation_to_tensordict(next_obs, num_agents) 
-            rollout_data['dones'][step] = next_done
-
+            #print('next obs before assignment: {}'.format(next_obs))
+            rollout_data[step] = next_obs# something goes wrong when we save the rollout data
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                actions, logprob, _, value = agent.get_action_and_value(next_obs, num_agents)
-                #values[step] = value.flatten()
-                rollout_data['values'][step] = value.flatten()
+                td_output = td_module(rollout_data[[step]])
+                #rollout_data[[step]] = td_module(rollout_data[[step]])
+                #print('module output: {}'.format(td_output))
 
-            rollout_data['actions'][step] = actions
-            rollout_data['logprobs'][step] = logprob
+                rollout_data[[step]] = td_output
+                #print('rollout data 0: {}'.format(rollout_data[[step]]))                
+                
+                #values[step] = value.flatten()
+                #rollout_data['values'][step] = value.flatten()
+
+            #rollout_data['actions'][step] = actions
+            #rollout_data['logprobs'][step] = logprob
 
             # manually reset the environment if it is done
             # currently we only train for one specific track layout
-            if next_done:
+            if next_obs['done']:
                 next_obs = env.reset()
-                reward = env.env.rewards_dict
+                env_renderer.reset()
+                reward = env.rewards_dict
                 done = False
             else:
-                next_obs, reward, done = env.step(actions_to_dict(actions))
-                done = done['__all__'] # only done if all agents are done
+                next_obs = env.step(rollout_data[step]).to(device)
+
+            #env_renderer.render_env(show=True, show_observations=False, show_predictions=False)
+            #print('agent attr: {}'.format(next_obs['observations']['agents_attr']))
+            #next_done = rollout_data[step]['dones']
+            #print('next_done: {}'.format(next_done))
+                #done = done['__all__'] # only done if all agents are done
             
-            reward = torch.tensor([value for _, value in reward.items()])
-            rollout_data['rewards'][step] = reward
-            next_done = done
+            # reward = torch.tensor([value for _, value in reward.items()])
+            #rollout_data['rewards'][step] = reward
+            #next_done = done
 
             """             for item in info:
                 if "episode" in item.keys():
@@ -430,28 +428,34 @@ if __name__ == "__main__":
                     writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
                     break """
+        #print('actions: {}'.format(rollout_data['actions']))
+        #print('valid_actions: {}'.format(rollout_data['observations']['valid_actions']))
         writer.add_scalar('rewards/min', rollout_data['rewards'].min(), global_step)
         writer.add_scalar('rewards/mean', rollout_data['rewards'].mean(), global_step)
 
         # Calculate advantages
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
-            advantages = torch.zeros_like(rewards)# .to(device)
-            lastgaelam = torch.zeros(num_agents)
+            next_obs_value = next_obs.unsqueeze(0)
+            next_obs_value['actions'] = torch.ones(1).to(device)
+            next_value = td_module(next_obs.unsqueeze(0))
+            next_value = next_value['values']
+            #print('got next values: {}'.format(next_value))
+            advantages = torch.zeros_like(rewards).to(device)
+            lastgaelam = torch.zeros(num_agents).to(device)
             for t in reversed(range(num_steps)):
                 if t == args.num_steps - 1:
-                    nextnonterminal = 1.0 - next_done
+                    nextnonterminal = 1.0 - next_obs['done'].item()
                     nextvalues = next_value
                 else:
                     #nextnonterminal = 1.0 - dones[t + 1]
-                    nextnonterminal = 1.0 - rollout_data['dones'][t + 1]
+                    nextnonterminal = 1.0 - rollout_data['done'][t + 1].item()
                     #nextvalues = values[t + 1]
                     nextvalues = rollout_data['values'][t + 1]
                 #delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
                 #advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
                 delta = rollout_data['rewards'][t] + args.gamma * nextvalues * nextnonterminal - rollout_data['values'][t]
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
-            returns = advantages + values
+            returns = advantages + rollout_data['values']
 
         # Optimizing the policy and value network
         b_inds = np.arange(num_steps)
@@ -462,23 +466,25 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
                 
-                updated_rollout_data = TensorDict({
+                """                 updated_rollout_data = TensorDict({
                     'newlogprob' : torch.zeros(args.minibatch_size, num_agents),
                     'entropy' : torch.zeros(args.minibatch_size, num_agents),
                     'newvalue' : torch.zeros(args.minibatch_size, num_agents)
-                }, batch_size = [args.minibatch_size, num_agents])
-                
+                }, batch_size = [args.minibatch_size, num_agents]) """
+                #print('minibatch: {}'.format(rollout_data[mb_inds]))
+                updated_rollout_data = td_module(rollout_data[mb_inds])
+                #print('got minibatch data')
                 # get the logprob, entropy and value for current network
                 # probably there is a prettier way to do this
-                for i, mb_ind in enumerate(mb_inds):
+                """                 for i, mb_ind in enumerate(mb_inds):
                     _, newlogprob, entropy, newvalue = agent.get_action_and_value(x = observation_from_tensordict(rollout_data[mb_ind]['observations']), 
                                                                                   n_agents = num_agents,
                                                                                   actions = rollout_data[mb_ind]['actions'])
                     updated_rollout_data['newlogprob'][i] = newlogprob
                     updated_rollout_data['entropy'][i] = entropy
-                    updated_rollout_data['newvalue'][i] = newvalue
+                    updated_rollout_data['newvalue'][i] = newvalue """
                 
-                logratio = updated_rollout_data['newlogprob'] - rollout_data['logprobs'][mb_inds]
+                logratio = updated_rollout_data['logprobs'] - rollout_data['logprobs'][mb_inds]
                 ratio = logratio.exp()
                 #print('ration: {}'.format(ratio))
                 #print('ratio shape: {}'.format(ratio.shape))
@@ -499,7 +505,7 @@ if __name__ == "__main__":
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
-                newvalue = updated_rollout_data['newvalue']
+                newvalue = updated_rollout_data['values']
                 if args.clip_vloss:
                     # not adapted for flatland yet
                     v_loss_unclipped = (newvalue - returns[mb_inds]) ** 2
