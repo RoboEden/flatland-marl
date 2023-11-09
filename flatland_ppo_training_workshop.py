@@ -29,6 +29,8 @@ from flatland.envs.rail_generators import SparseRailGen
 from flatland_cutils import TreeObsForRailEnv as TreeCutils
 from flatland.envs.step_utils.states import TrainState
 
+from gym.vector import SyncVectorEnv
+
 import PIL
 from flatland.utils.rendertools import RenderTool, AgentRenderVariant
 from IPython.display import clear_output
@@ -91,9 +93,9 @@ def parse_args():
         help="the surrogate clipping coefficient")
     parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
-    parser.add_argument("--ent-coef", type=float, default=0.01,
+    parser.add_argument("--ent-coef", type=float, default=0.000000001,
         help="coefficient of the entropy")
-    parser.add_argument("--vf-coef", type=float, default=0.01,
+    parser.add_argument("--vf-coef", type=float, default=0.00001,
         help="coefficient of the value function")
     parser.add_argument("--max-grad-norm", type=float, default=0.5,
         help="the maximum norm for the gradient clipping")
@@ -320,6 +322,7 @@ if __name__ == "__main__":
     #)
     
     env = create_random_env()
+
     env_renderer = RenderTool(env,
                               agent_render_variant=AgentRenderVariant.ONE_STEP_BEHIND,
                               show_debug=False,
@@ -411,6 +414,8 @@ if __name__ == "__main__":
                 done = False
             else:
                 next_obs = env.step(rollout_data[step]).to(device)
+                
+            print('reward: {}'.format(rollout_data[step]['rewards']))
 
             #env_renderer.render_env(show=True, show_observations=False, show_predictions=False)
             #print('agent attr: {}'.format(next_obs['observations']['agents_attr']))
