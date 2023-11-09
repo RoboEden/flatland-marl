@@ -1,0 +1,69 @@
+repos:
+  - repo: local
+    hooks:
+      - id: poetry-check
+        name: poetry-check
+        description: run poetry check to validate config
+        entry: poetry check
+        language: system
+        pass_filenames: false
+        files: (^|/)pyproject.toml$
+
+      - id: trailing-whitespace-fixer
+        name: trailing-whitespace-fixer
+        entry: trailing-whitespace-fixer
+        language: python
+        types: [text]
+
+      - id: end-of-file-fixer
+        name: end-of-file-fixer
+        entry: end-of-file-fixer
+        language: python
+        types: [text]
+
+      - id: isort
+        name: isort
+        entry: isort
+        require_serial: true
+        language: python
+        types_or: [cython, pyi, python]
+        args: ['--filter-files']
+
+      - id: black
+        name: black
+        entry: black
+        language: python
+        files: '\.py$'
+
+      - id: pydocstyle
+        name: pydocstyle
+        entry: pydocstyle
+        language: python
+        files: '\.py$'
+        exclude: '^tests\/'
+
+      - id: pylint
+        name: pylint
+        entry: env PYTHONPATH='src/{{ cookiecutter.package_name }}/:tests/{{ cookiecutter.package_name }}/' pylint
+        language: system
+        require_serial: true
+        types: [python]
+        pass_filenames: false
+        files: '\.py$'
+        args:
+          [
+            'src', 'tests',
+            '-rn', # Only display messages
+            '-sn', # Don't display the score
+          ]
+        verbose: true
+
+      - id: mypy
+        name: mypy
+        entry: mypy
+        language: python
+        'types_or': [python, pyi]
+        args: ["--scripts-are-modules"]
+        require_serial: true
+        additional_dependencies: []
+        minimum_pre_commit_version: '2.9.2'
