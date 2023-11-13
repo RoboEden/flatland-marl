@@ -130,7 +130,7 @@ class Network_td(nn.Module):
         
         # define distribution over all actions for the moment
         # might be an idea to only do it for the available options
-        #print('tpye of logits: {}'.format(type(logits)))
+        print('tpye of logits: {}'.format((logits)))
         probs = Categorical(logits=logits)
         #logits = logits.numpy()
         if not torch.count_nonzero(actions): # check if we already assigned actions or need to draw
@@ -141,11 +141,13 @@ class Network_td(nn.Module):
             probs_valid_actions = torch.reshape(probs_valid_actions, valid_actions.shape)
             #print('probs valid actions: {}'.format(probs_valid_actions))
             probs_valid_actions[~valid_actions] = 0
-            #print('probs valid actions: {}'.format(probs_valid_actions))
+            print('probs valid actions: {}'.format(probs_valid_actions))
             #print('probs valid actions withzeros: {}'.format(probs_valid_actions))
             probs_valid_actions = Categorical(probs = probs_valid_actions)
-            actions = probs_valid_actions.sample()       
-            #print('sampled actions: {}'.format(actions))
+            
+            actions = probs_valid_actions.sample()    
+               
+            print('sampled actions: {}'.format(actions))
             """             valid_actions = np.array(valid_actions)
             for i in range(n_agents):
                 if n_agents == 1:

@@ -34,6 +34,7 @@ repos:
         entry: black
         language: python
         files: '\.py$'
+        args: [--line-length=80]
 
       - id: pydocstyle
         name: pydocstyle
@@ -50,12 +51,12 @@ repos:
         types: [python]
         pass_filenames: false
         files: '\.py$'
-        args:
-          [
-            'src', 'tests',
-            '-rn', # Only display messages
-            '-sn', # Don't display the score
-          ]
+        #args:
+        #  [
+        #    'src', 'tests',
+        #    '-rn', # Only display messages
+        #    '-sn', # Don't display the score
+        #  ]
         verbose: true
 
       - id: mypy

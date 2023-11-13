@@ -24,6 +24,8 @@ pylint = "^3.0.2"
 black = "^23.11.0"
 pre-commit = "^3.5.0"
 pre-commit-hooks = "^4.5.0"
+mypy = "^1.6.1"
+gymnasium = "^0.29.1"
 
 
 [build-system]
