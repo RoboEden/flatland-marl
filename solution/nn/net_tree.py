@@ -71,6 +71,15 @@ class Network_td(nn.Module):
             nn.GELU(),
             nn.Linear(ns.hidden_sz, 1),
         )
+        self.apply(self._init_weights)
+        
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=0.1)
+            print("initialized weights")
+            if module.bias is not None:
+                module.bias.data.zero_()
+
 
     # @torchsnooper.snoop()
     def get_embedding(input_td): #get_embedding(self, agents_attr, forest, adjacency, node_order, edge_order):
@@ -125,15 +134,18 @@ class Network_td(nn.Module):
         #embedding_td = self.get_embedding(obs_td)
         logits = self.actor(embedding, att_embedding)
         logits = logits.squeeze().detach() #.numpy()  
-        
+        #print('logits: {}'.format(logits))
         #valid_actions = x[0]['valid_actions']
         
         # define distribution over all actions for the moment
         # might be an idea to only do it for the available options
 
         probs = Categorical(logits=logits)
+        #print("shape of logits: {}".format(logits.shape))
+        #print("logits taken from dist: {}".format(probs.logits))
         #logits = logits.numpy()
         if not torch.count_nonzero(actions): # check if we already assigned actions or need to draw
+            #print("drawing new action")
             valid_actions = obs_td['valid_actions']
             #actions = dict()
             #print('valid_actions: {}'.format(valid_actions))
@@ -142,42 +154,40 @@ class Network_td(nn.Module):
             #print('probs valid actions: {}'.format(probs_valid_actions))
             probs_valid_actions[~valid_actions] = 0
             probs_valid_actions = Categorical(probs = probs_valid_actions)
+            #print('probs valid actions: {}'.format(probs_valid_actions.probs))
+            actions = probs_valid_actions.sample()
             
-            actions = probs_valid_actions.sample()    
-               
-            """             valid_actions = np.array(valid_actions)
-            for i in range(n_agents):
-                if n_agents == 1:
-                    actions[i] = self._choose_action(valid_actions[i, :], logits)
-                else:
-                    #print(logits[i, :])
-                    actions[i] = self._choose_action(valid_actions[i, :], logits[i, :]) """
-                    #print(actions[i])
+        else:
+            #print("used old actions")
+            probs_valid_actions = torch.ones_like(obs_td['valid_actions'])
+            probs_valid_actions = Categorical(probs = probs_valid_actions)
+            
         #actions_dict = {handle: action for handle, action in enumerate(actions)}
         #print('action before return: {}'.format(actions))
         #actions = torch.tensor(actions, dtype = torch.int64)
         actions.type(torch.int64)
-        logprobs = torch.tensor(probs.log_prob(actions), dtype = torch.float32)
+        #print('actions shape: {}'.format(actions.shape))
+        #logprobs = torch.tensor(probs.log_prob(actions), dtype = torch.float32)
         entropy = probs.entropy().type(torch.float32).reshape(batch_size)
         values = self.critic(embedding, att_embedding).type(torch.float32)
         #print('got to before assigning td')
-        td_out = TensorDict({'actions': actions, 'logprobs' : logprobs, 'entropy' : entropy,'values' : values}, batch_size= [])
+        #td_out = TensorDict({'actions': actions, 'logprobs' : logprobs, 'entropy' : entropy,'values' : values}, batch_size= [])
         #print('after assigning td')
         #print('actions shape: {}'.format(actions.shape))
         #print('logprobs shape: {}'.format(logprobs.shape))
         #print('entropy shape: {}'.format(entropy.shape))
         #print('values shape: {}'.format(values.shape))
-        return actions, logprobs, entropy, values
+        #print(probs_valid_actions.probs)
+        #print(logprobs)
+        #print("logprobs full: {}".format(probs.logits))
+        #print("log probs only of chosen action: {}".format(probs.log_prob(actions)))
+        #print("probs batch shape: {}".format(probs.batch_shape))
+        #print("probs event shape: {}".format(probs.event_shape))
+        #print("actions shape in net: {}".format(actions.shape))
+        #print("log probs in net before return no squeeze: {}".format(probs.log_prob(actions).shape))
+        #print("log probs in net before return: {}".format(probs.log_prob(actions.squeeze(-1)).unsqueeze(-1).shape))
+        return actions, probs.log_prob(actions.squeeze(-1)).unsqueeze(-1), entropy, values, probs_valid_actions.probs
         #return self.actor(embedding, att_embedding), self.critic(embedding, att_embedding)
-        
-    """     def forward(self, agents_attr, forest, adjacency, node_order, edge_order):
-        batch_size, n_agents, num_nodes, _ = forest.shape
-        device = next(self.parameters()).device
-        embedding, att_embedding = self.get_embedding(agents_attr, forest, adjacency, node_order, edge_order)
-        worker_action = torch.zeros((batch_size, n_agents, 5), device=device)
-        worker_action[:, :n_agents, :] = self.actor(embedding, att_embedding)
-        critic_value = self.critic(embedding, att_embedding)
-        return [worker_action], critic_value  # (batch size, 1) """
     
     def actor(self, embedding, att_embedding):
         worker_action = torch.cat([embedding, att_embedding], dim=-1)
@@ -188,7 +198,7 @@ class Network_td(nn.Module):
     def critic(self, embedding, att_embedding):
         output = torch.cat([embedding, att_embedding], dim=-1)
         critic_value = self.critic_net(output)
-        critic_value = critic_value.mean(1).view(-1)
+        critic_value = critic_value.mean(1).view(-1) # what exactly are we doing here?
         return critic_value
 
     def modify_adjacency(self, adjacency, _device):
