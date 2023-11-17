@@ -75,7 +75,7 @@ def parse_args():
         help="the learning rate of the optimizer")
     parser.add_argument("--num-envs", type=int, default=1,
         help="the number of parallel game environments")
-    parser.add_argument("--num-steps", type=int, default=100,
+    parser.add_argument("--num-steps", type=int, default=1000,
         help="the number of steps to run in each environment per policy rollout")
     parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True, # try constant learning rate
         help="Toggle learning rate annealing for policy and value networks")
@@ -83,13 +83,13 @@ def parse_args():
         help="the discount factor gamma")
     parser.add_argument("--gae-lambda", type=float, default=0.95,
         help="the lambda for the general advantage estimation")
-    parser.add_argument("--num-minibatches", type=int, default=1,
+    parser.add_argument("--num-minibatches", type=int, default=10,
         help="the number of mini-batches")
-    parser.add_argument("--update-epochs", type=int, default=1,
+    parser.add_argument("--update-epochs", type=int, default=4,
         help="the K epochs to update the policy")
     parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles advantages normalization")
-    parser.add_argument("--clip-coef", type=float, default=0.2,
+    parser.add_argument("--clip-coef", type=float, default=0.3,
         help="the surrogate clipping coefficient")
     parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
@@ -105,8 +105,8 @@ def parse_args():
         help="path to the pretrained network to be used")
     parser.add_argument("--use-pretrained-network", action=argparse.BooleanOptionalAction)
     parser.add_argument('--no-training', action='store_true')
-    parser.add_argument("--do-render", type=bool, default=False,
-        help="Toggles whether to render rollouts in realtime")
+    parser.add_argument('--use-left-right-map', action='store_true')
+    parser.add_argument("--do-render", action='store_true')
     parser.add_argument("--use-env-reward", type=bool, default=False,
         help="Toggles whether to use the default flatland env reward at each step")
     parser.add_argument("--use-start-reward", type=bool, default=True,
@@ -160,9 +160,9 @@ class RailEnvTd(RailEnv):
         
         for agent_i, agent in enumerate(self.agents):
             agent.earliest_departure = 0
-            agent.latest_arrival = 2
+            agent.latest_arrival = 10
         
-        self._max_episode_steps = 1
+        self._max_episode_steps = 20
         
         if tensordict is None:
             tensordict_out = TensorDict({}, batch_size=[])
@@ -206,6 +206,7 @@ class RailEnvTd(RailEnv):
     def update_step_rewards(self, i_agent):
         
         if args.use_env_reward:
+            print("using env reward")
             reward = None
             agent = self.agents[i_agent]
             # agent done? (arrival_time is not None)
@@ -237,10 +238,12 @@ class RailEnvTd(RailEnv):
             self.rewards_dict[i_agent] += reward
         
         if args.use_start_reward:
+            #print(self._elapsed_steps)
             agent = self.agents[i_agent]
             if agent.state.is_on_map_state() and agent.state_machine.previous_state.is_off_map_state():
                 self.rewards_dict[i_agent] = args.start_reward
-                
+            #if agent.state.is_off_map_state() and agent.state_machine.previous_state.is_off_map_state() and self._elapsed_steps > 1:
+            #    self.rewards_dict[i_agent] = args.start_reward
     def _handle_end_reward(self, agent: EnvAgent) -> int:
         if args.use_start_reward:
             return 0
@@ -296,34 +299,101 @@ right_switch_from_west = transitions.rotate_transition(right_switch_from_south, 
 right_switch_from_north = transitions.rotate_transition(right_switch_from_south, 180)
 right_switch_from_east = transitions.rotate_transition(right_switch_from_south, 270)
 
-width = 12
+map_height = 5
+map_width = 12
 
-rail_map = np.array(
-    [[empty]*width] +
-    [[empty]*width] +
-    [[dead_end_from_east] + [horizontal_straight]*(width-2) + [dead_end_from_west]] +
-    [[empty]*width] +
-    [[empty]*width],
-dtype=np.uint16)
+def generate_custom_rail():
+    if args.use_left_right_map:
+        if True: #np.random.binomial(1, 0.5):
+            print("north")
+            
+            rail_map = np.array(
+                [[empty] + [dead_end_from_south] + [empty]*(map_width-2)] +
+                [[empty] + [vertical_straight] + [empty]*(map_width-2)] +
+                [[dead_end_from_east] + [right_switch_from_east] + [horizontal_straight]*(map_width-3) + [dead_end_from_west]] +
+                [[empty]*map_width] +
+                [[empty]*map_width],
+            dtype=np.uint16)
+            
+            train_stations = [
+                [((2, map_width-2), 0)],
+                [((0, 1), 0)],
+            ]
 
-train_stations = [
-    [((2, width-2), 0)],
-    [((2, 0), 0)],
-]
+            city_positions = [(2, map_width-2), (0, 1)]
+            city_orientations = [1, 0]
 
-city_positions = [(2, width-2), (2, 0)]
-city_orientations = [1, 1]
+            agents_hints = {
+                "city_positions": city_positions,
+                "train_stations": train_stations,
+                "city_orientations": city_orientations,
+            }
 
-agents_hints = {
-    "city_positions": city_positions,
-    "train_stations": train_stations,
-    "city_orientations": city_orientations,
-}
+            optionals = {"agents_hints": agents_hints}
 
-optionals = {"agents_hints": agents_hints}
+            rail = GridTransitionMap(width=rail_map.shape[1], height=rail_map.shape[0], transitions=transitions)
+            rail.grid = rail_map
+            
+            return rail, optionals
+            
+        else:
+            print("south")
+            rail_map = np.array(
+                [[empty]*map_width] +
+                [[empty]*map_width] +
+                [[dead_end_from_east] + [left_switch_from_east] + [horizontal_straight]*(map_width-3) + [dead_end_from_west]] +
+                [[empty] + [vertical_straight] + [empty]*(map_width-2)] +
+                [[empty] + [dead_end_from_south] + [empty]*(map_width-2)],
+            dtype=np.uint16)
+            
+            train_stations = [
+                [((2, map_width-2), 0)],
+                [((4, 1), 0)],
+            ]
 
-rail = GridTransitionMap(width=rail_map.shape[1], height=rail_map.shape[0], transitions=transitions)
-rail.grid = rail_map
+            city_positions = [(2, map_width-2), (4, 1)]
+            city_orientations = [1, 0]
+
+            agents_hints = {
+                "city_positions": city_positions,
+                "train_stations": train_stations,
+                "city_orientations": city_orientations,
+            }
+
+            optionals = {"agents_hints": agents_hints}
+
+            rail = GridTransitionMap(width=rail_map.shape[1], height=rail_map.shape[0], transitions=transitions)
+            rail.grid = rail_map
+            return rail, optionals
+    else:
+        rail_map = np.array(
+            [[empty]*map_width] +
+            [[empty]*map_width] +
+            [[dead_end_from_east] + [horizontal_straight]*(map_width-2) + [dead_end_from_west]] +
+            [[empty]*map_width] +
+            [[empty]*map_width],
+        dtype=np.uint16)
+
+        train_stations = [
+            [((2, map_width-2), 0)],
+            [((2, 0), 0)],
+        ]
+
+        city_positions = [(2, map_width-2), (2, 0)]
+        city_orientations = [1, 1]
+
+        agents_hints = {
+            "city_positions": city_positions,
+            "train_stations": train_stations,
+            "city_orientations": city_orientations,
+        }
+
+        optionals = {"agents_hints": agents_hints}
+
+        rail = GridTransitionMap(width=rail_map.shape[1], height=rail_map.shape[0], transitions=transitions)
+        rail.grid = rail_map
+        
+        return rail, optionals
 
 class BaseLineGen(object):
     def __init__(self, speed_ratio_map: Mapping[float, float] = None, seed: int = 1):
@@ -341,14 +411,17 @@ def create_random_env():
     """Create a random railEnv object
     Taken from the flatland-marl demo
     """
-
+    #rail, rail_map, optionals = generate_switch_rail()
     return RailEnvTd(
         number_of_agents=args.num_agents,
-        width=rail_map.shape[1],
-        height=rail_map.shape[0],
-        rail_generator=rail_from_grid_transition_map(rail, optionals),
+        #width=rail_map.shape[1],
+        #height=rail_map.shape[0],
+        width = map_width,
+        height = map_height,
+        #rail_generator=rail_from_grid_transition_map(rail, optionals),
+        rail_generator=rail_from_grid_transition_map(*generate_custom_rail()),
         line_generator=SparseLineGen(
-            speed_ratio_map={1.0: 1 / 4, 0.5: 1 / 4, 0.33: 1 / 4, 0.25: 1 / 4},
+            speed_ratio_map={1.0: 1}, #0.5: '', 0.33: 1 / 4, 0.25: 1 / 4},
             seed = 1
         ),
         malfunction_generator=ParamMalfunctionGen(
@@ -409,7 +482,7 @@ if __name__ == "__main__":
             screen_width=800,
         )
     #env_renderer.render_env(show=True, show_observations=False, show_predictions=False)
-    torch.manual_seed(0) # changed from 1
+    #torch.manual_seed(0) # changed from 1
     network = Network_td()
     print(args.use_pretrained_network)
     if args.use_pretrained_network:
@@ -496,19 +569,26 @@ if __name__ == "__main__":
         rollout_data['actions'] = torch.zeros_like(rollout_data['actions'])
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs
+            #print("logprobs shape: {}".format(next_obs['logprobs'].shape))
+            #print("next obs: {}".format(next_obs))
             rollout_data[
                 step
-            ].update_(next_obs)# save for training, also includes the done
+            ].update(next_obs, inplace = True)# save for training, also includes the done
+            #print("valid actions before step: {}".format(next_obs['observations']['valid_actions']))
             # ALGO LOGIC: action logic
             with torch.no_grad():
                 rollout_data[[step]] = (td_module(rollout_data[[step]]))
-
+            #print("actions drawn from net: {}".format(rollout_data[step]['actions']))
+            #print("action chosen: {}".format(rollout_data[step]['actions']))
             next_obs, rewards = env.step(rollout_data[step])
+            #print("reward received: {}".format(rewards['rewards']))
             #print("rewards: {}".format(rewards['rewards']))
             rollout_data[step].update_(rewards) # save the rewards received for actions in current step
-            
+            #print("rewards saved: {}".format(rollout_data[step]['rewards']))
             if next_obs['done']:
-                next_obs.update_(env.reset(random_seed=1)) # only overwriting keys returned by reset, i.e. 'observations'
+                print("resetting env")
+                #next_obs.update_(env.reset(random_seed=1)) # only overwriting keys returned by reset, i.e. 'observations'
+                next_obs.update_(env.reset(random_seed=1))
                 if args.do_render:
                     env_renderer.reset()
 
@@ -516,7 +596,9 @@ if __name__ == "__main__":
                 env_renderer.render_env(show=True, show_observations=False, show_predictions=False)
             #print("valid actions: {}".format(next_obs['observations']['valid_actions']))
             #input("Press Enter to continue...")
-
+        
+        
+        
         writer.add_scalar(
             "rewards/min", rollout_data["rewards"].min(), global_step
         )
@@ -529,11 +611,11 @@ if __name__ == "__main__":
         writer.add_scalar(
             "action_freq/do_nothing",  (rollout_data['actions'] == 4).sum(), global_step
         )
-        print("valid action probs: {}".format(rollout_data['valid_actions_probs'].shape))
+        #print("valid action probs: {}".format(rollout_data['valid_actions_probs'].shape))
         writer.add_scalar("action_probs/forward", (rollout_data['valid_actions_probs'][:,:,2].mean()), global_step)
         writer.add_scalar("action_probs/do_nothing", (rollout_data['valid_actions_probs'][:,:,4].mean()), global_step)
 
-        print("rollout actions size: {}".format(torch.bincount(rollout_data['actions'].squeeze(1))))
+        print("rollout actions frequency: {}".format(torch.bincount(rollout_data['actions'].squeeze(1))))
         
         
         next_obs = next_obs.to(device)
@@ -565,7 +647,11 @@ if __name__ == "__main__":
                 )
             returns = advantages + rollout_data["values"]
         writer.add_scalar("internal_values/advantages_max", advantages.max(), global_step)
-        writer.add_scalar("internal_values/advantages_min", advantages.min(), global_step)      
+        writer.add_scalar("internal_values/advantages_min", advantages.min(), global_step)
+        #print(rollout_data['rewards'].shape)
+        #print(rollout_data['done'].shape)
+        #print(rollout_data['values'].shape)
+        #print("rollout data: {}".format(torch.cat((advantages, returns, rollout_data['actions'], rollout_data['rewards'], rollout_data['done'].unsqueeze(-1), rollout_data['values']), dim=1)))
         # Optimizing the policy and value network
         b_inds = np.arange(args.num_steps)
         clipfracs = []
@@ -573,21 +659,25 @@ if __name__ == "__main__":
             print("currently in epoch: {}".format(epoch))
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
+                #print("start of mb: {}".format(start))
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
                 updated_rollout_data = td_module(rollout_data[mb_inds])
-                print("updated rollout data: {}".format(updated_rollout_data))
-                print("shape of rollout data logprobs: {}".format(rollout_data['logprobs'][mb_inds].shape))
-                print("shape of updated rollout data logrpobs: {}".format(updated_rollout_data['logprobs'].shape))
+                #print("updated logprobs have autograd: {}".format(updated_rollout_data['logprobs'].requires_grad))
+                #print("updated values have autograd: {}".format(updated_rollout_data['values'].requires_grad))
+                #print("updated rollout data: {}".format(updated_rollout_data))
+                #print("shape of rollout data logprobs: {}".format(rollout_data['logprobs'][mb_inds].shape))
+                #print("shape of updated rollout data logrpobs: {}".format(updated_rollout_data['logprobs'].shape))
                 logratio = (
                     updated_rollout_data["logprobs"]
                     - rollout_data["logprobs"][mb_inds]
                 )
-                print("shape of logratio: {}".format(logratio.shape))
+                #print("shape of logratio: {}".format(logratio.shape))
                 ratio = logratio.exp() # not changing at the moment, that makes senses
                 #print("prob ration in training: {}".format(ratio))
-                print("ration mean: {}".format(ratio.max()))
+                #print("ration mean: {}".format(ratio.max()))
+                #print("ratio has autograd: {}".format(ratio.requires_grad))
                 with torch.no_grad():
                     # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
@@ -606,10 +696,10 @@ if __name__ == "__main__":
                     )
 
                 # Policy loss
-                print(mb_advantages.cpu().squeeze(-1).numpy().shape)
-                print(ratio.cpu().squeeze(-1).numpy().shape)
-                print(rollout_data[mb_inds]['actions'].cpu().squeeze(-1).numpy().shape)
-                print("cat advangates: {}".format(torch.cat((mb_advantages, ratio, rollout_data[mb_inds]['actions']), dim=1)))
+                #print(mb_advantages.cpu().squeeze(-1).numpy().shape)
+                #print(ratio.cpu().squeeze(-1).numpy().shape)
+                #print(rollout_data[mb_inds]['actions'].cpu().squeeze(-1).numpy().shape)
+                #print("cat advangates: {}".format(torch.cat((mb_advantages, ratio, rollout_data[mb_inds]['actions']), dim=1)))
                 pg_loss1 = -mb_advantages * ratio
                 pg_loss2 = -mb_advantages * torch.clamp(
                     ratio, 1 - args.clip_coef, 1 + args.clip_coef
@@ -653,6 +743,21 @@ if __name__ == "__main__":
             if args.target_kl is not None:
                 if approx_kl > args.target_kl:
                     break
+        
+        """         for param in td_module.actor_net.parameters():
+            print("shape of param: {}".format(param.shape))
+            print("content of param: {}".format(param.data))
+            print("param has autogra: {}".format(param.requires_grad))
+            print(" param gradients: {}".format(param.grad))
+            
+        for param in td_module.critic_net.parameters():
+            print("critic shape of param: {}".format(param.shape))
+            print("content of param: {}".format(param.data))
+            print("param has autogra: {}".format(param.requires_grad))
+            print(" param gradients: {}".format(param.grad)) """
+            
+        del next_obs['actions']
+        del next_obs['logprobs']
         print('update nr: {}'.format(update))
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         writer.add_scalar(

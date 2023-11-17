@@ -130,10 +130,15 @@ class Network_td(nn.Module):
         att_embedding = self.transformer(embedding)
         #print(f'shape of embedding:{embedding.shape}')
         
-        
+        #print("att embedding: {}".format(att_embedding))
         #embedding_td = self.get_embedding(obs_td)
         logits = self.actor(embedding, att_embedding)
-        logits = logits.squeeze().detach() #.numpy()  
+        #print('shape of logits before detach: {}'.format(logits.shape))
+        #print("logits before detach: {}".format(logits))
+        
+        #logits = logits.squeeze().detach() #.numpy() 
+        #print('shape of logits after detach: {}'.format(logits.shape)) 
+        
         #print('logits: {}'.format(logits))
         #valid_actions = x[0]['valid_actions']
         
@@ -141,6 +146,8 @@ class Network_td(nn.Module):
         # might be an idea to only do it for the available options
 
         probs = Categorical(logits=logits)
+        #print("batch shape of probs: {}".format(probs.batch_shape))
+        #print('event shape of probs: {}'.format(probs.event_shape))
         #print("shape of logits: {}".format(logits.shape))
         #print("logits taken from dist: {}".format(probs.logits))
         #logits = logits.numpy()
@@ -150,9 +157,14 @@ class Network_td(nn.Module):
             #actions = dict()
             #print('valid_actions: {}'.format(valid_actions))
             probs_valid_actions = probs.probs
+            #print("probs valid actions from probs dist: {}".format(probs_valid_actions))
             probs_valid_actions = torch.reshape(probs_valid_actions, valid_actions.shape)
-            #print('probs valid actions: {}'.format(probs_valid_actions))
+            #print('probs valid actions before zero: {}'.format(probs_valid_actions))
+            
             probs_valid_actions[~valid_actions] = 0
+            if not torch.count_nonzero(probs_valid_actions):
+                probs_valid_actions[valid_actions] = 0.1
+            print('probs valid actions after zero: {}'.format(probs_valid_actions))
             probs_valid_actions = Categorical(probs = probs_valid_actions)
             #print('probs valid actions: {}'.format(probs_valid_actions.probs))
             actions = probs_valid_actions.sample()
