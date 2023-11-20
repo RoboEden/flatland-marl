@@ -164,11 +164,11 @@ class Network_td(nn.Module):
             probs_valid_actions[~valid_actions] = 0
             if not torch.count_nonzero(probs_valid_actions):
                 probs_valid_actions[valid_actions] = 0.1
-            print('probs valid actions after zero: {}'.format(probs_valid_actions))
+            #print('probs valid actions after zero: {}'.format(probs_valid_actions))
             probs_valid_actions = Categorical(probs = probs_valid_actions)
             #print('probs valid actions: {}'.format(probs_valid_actions.probs))
             actions = probs_valid_actions.sample()
-            
+
         else:
             #print("used old actions")
             probs_valid_actions = torch.ones_like(obs_td['valid_actions'])

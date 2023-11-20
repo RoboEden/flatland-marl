@@ -107,11 +107,14 @@ def parse_args():
     parser.add_argument('--no-training', action='store_true')
     parser.add_argument('--use-left-right-map', action='store_true')
     parser.add_argument("--do-render", action='store_true')
+    parser.add_argument('--use-arrival-reward', action='store_true')
+    parser.add_argument('--freeze-embeddings', action=argparse.BooleanOptionalAction)
     parser.add_argument("--use-env-reward", type=bool, default=False,
         help="Toggles whether to use the default flatland env reward at each step")
-    parser.add_argument("--use-start-reward", type=bool, default=True,
-        help="Toggles whether to only give reward once a train departs")
-    parser.add_argument("--start-reward", type=int, default=1, 
+    parser.add_argument('--use-start-reward', action=argparse.BooleanOptionalAction)
+    parser.add_argument('--use-delay-reward', action=argparse.BooleanOptionalAction)
+    parser.add_argument('--initialize-action-weights', action=argparse.BooleanOptionalAction)
+    parser.add_argument("--arrival-reward", type=int, default=1, 
         help="The reward to be returned when the train departs.")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -162,7 +165,7 @@ class RailEnvTd(RailEnv):
             agent.earliest_departure = 0
             agent.latest_arrival = 10
         
-        self._max_episode_steps = 20
+        self._max_episode_steps = 10
         
         if tensordict is None:
             tensordict_out = TensorDict({}, batch_size=[])
@@ -238,14 +241,41 @@ class RailEnvTd(RailEnv):
             self.rewards_dict[i_agent] += reward
         
         if args.use_start_reward:
+            print("using start reward")
             #print(self._elapsed_steps)
             agent = self.agents[i_agent]
             if agent.state.is_on_map_state() and agent.state_machine.previous_state.is_off_map_state():
                 self.rewards_dict[i_agent] = args.start_reward
             #if agent.state.is_off_map_state() and agent.state_machine.previous_state.is_off_map_state() and self._elapsed_steps > 1:
             #    self.rewards_dict[i_agent] = args.start_reward
+            
+        if args.use_arrival_reward:
+            agent = self.agents[i_agent]
+            #print("shortest path: {}".format(agent.get_shortest_path(self.distance_map)))
+            print('agent delay: {}'.format((agent.get_current_delay(self._elapsed_steps, self.distance_map))))
+            #print("agent position: {}".format(agent.position))
+            #print("agent target: {}".format(agent.target))
+            if agent.state == TrainState.DONE:
+                #print("agent position equal targer: {}".format(agent.position == agent.target))
+                print("reward for arriving")
+                self.rewards_dict[i_agent] = args.arrival_reward
+            if agent.get_travel_time_on_shortest_path(self.distance_map) > (self._max_episode_steps-self._elapsed_steps + 2):
+                #print(self._max_episode_steps - self._elapsed_steps)
+                #print(agent.get_travel_time_on_shortest_path(self.distance_map))
+                #print("penalty for wrong choice")
+                #print(agent.get_travel_time_on_shortest_path(self.distance_map) - self._elapsed_steps)
+                #print(agent.get_current_delay(self._elapsed_steps, self.distance_map))
+                self.rewards_dict[i_agent] = agent.get_travel_time_on_shortest_path(self.distance_map) - self._elapsed_steps # not too big penalty, so trains still depart
+            #if agent.state==TrainState.READY_TO_DEPART and self._elapsed_steps > 2:
+            #    print("penalty for waiting")
+            #    self.rewards_dict[i_agent] = -args.arrival_reward
+        if args.use_delay_reward:
+            agent=self.agents[i_agent]
+            self.rewards_dict[i_agent]=agent.get_current_delay(self._elapsed_steps, self.distance_map)
+                
     def _handle_end_reward(self, agent: EnvAgent) -> int:
-        if args.use_start_reward:
+        if args.use_start_reward or args.use_arrival_reward or args.use_delay_reward:
+            #print("no end reward")
             return 0
         else:
             super()._handle_end_reward(self, agent)
@@ -299,19 +329,47 @@ right_switch_from_west = transitions.rotate_transition(right_switch_from_south, 
 right_switch_from_north = transitions.rotate_transition(right_switch_from_south, 180)
 right_switch_from_east = transitions.rotate_transition(right_switch_from_south, 270)
 
-map_height = 5
-map_width = 12
+map_height = 3
+map_width = 5
 
 def generate_custom_rail():
     if args.use_left_right_map:
-        if True: #np.random.binomial(1, 0.5):
+        if True: 
+            print("left right loop")
+            rail_map = np.array(
+                [[empty] + [right_turn_from_south] + [horizontal_straight] + [right_turn_from_west] + [empty]] +
+                [[left_turn_from_east] + [right_switch_from_east] + [horizontal_straight] + [left_switch_from_west] + [right_turn_from_west]] +
+                [[right_turn_from_east] + [horizontal_straight]*(3) + [left_turn_from_west]],
+            dtype=np.uint16)
+            train_stations = [
+                [((0,2), 0)],
+                [((2, 2), 0)],
+            ]
+
+            city_positions = [(0, 2), (2, 2)]
+            city_orientations = [1, 1]
+
+            agents_hints = {
+                "city_positions": city_positions,
+                "train_stations": train_stations,
+                "city_orientations": city_orientations,
+            }
+
+            optionals = {"agents_hints": agents_hints}
+
+            rail = GridTransitionMap(width=rail_map.shape[1], height=rail_map.shape[0], transitions=transitions)
+            rail.grid = rail_map
+            
+            return rail, optionals
+                
+        elif False:# : #np.random.binomial(1, 0.5):
             print("north")
             
             rail_map = np.array(
                 [[empty] + [dead_end_from_south] + [empty]*(map_width-2)] +
                 [[empty] + [vertical_straight] + [empty]*(map_width-2)] +
-                [[dead_end_from_east] + [right_switch_from_east] + [horizontal_straight]*(map_width-3) + [dead_end_from_west]] +
-                [[empty]*map_width] +
+                [[left_turn_from_east] + [right_switch_from_east] + [horizontal_straight]*(map_width-3) + [left_turn_from_south]] +
+                [[left_turn_from_north] + [horizontal_straight]*(map_width - 2) + [left_turn_from_west]] +
                 [[empty]*map_width],
             dtype=np.uint16)
             
@@ -340,8 +398,8 @@ def generate_custom_rail():
             print("south")
             rail_map = np.array(
                 [[empty]*map_width] +
-                [[empty]*map_width] +
-                [[dead_end_from_east] + [left_switch_from_east] + [horizontal_straight]*(map_width-3) + [dead_end_from_west]] +
+                [[right_turn_from_south] + [horizontal_straight]*(map_width - 2) + [right_turn_from_west]] +
+                [[right_turn_from_east] + [left_switch_from_east] + [horizontal_straight]*(map_width-3) + [right_turn_from_north]] +
                 [[empty] + [vertical_straight] + [empty]*(map_width-2)] +
                 [[empty] + [dead_end_from_south] + [empty]*(map_width-2)],
             dtype=np.uint16)
@@ -500,6 +558,28 @@ if __name__ == "__main__":
     if args.no_training:
         for param in td_module.parameters():
             param.requires_grad = False
+            
+    if args.freeze_embeddings:
+        for param in td_module.attr_embedding.parameters():
+            param.requires_grad = False
+        for param in td_module.transformer.parameters():
+            param.requires_grad = False
+        for param in td_module.critic_net.parameters():
+            param.requires_grad = False
+        for param in td_module.tree_lstm.parameters():
+            param.requires_grad = False
+            
+        print("froze non-action layers")
+    
+    if args.initialize_action_weights:
+        for param in td_module.actor_net:
+            if isinstance(param, nn.Linear):
+                print("init linear layer")
+                param.weight.data.normal_(mean=0.0, std=0.1)
+                param.bias.data.zero_()
+        #td_module.actor_net.apply(td_module._init_weights(td_module.actor_net))
+        print("initialized action weights")
+        
 
     optimizer = optim.Adam(
         td_module.parameters(), lr=args.learning_rate, eps=1e-5
@@ -586,9 +666,9 @@ if __name__ == "__main__":
             rollout_data[step].update_(rewards) # save the rewards received for actions in current step
             #print("rewards saved: {}".format(rollout_data[step]['rewards']))
             if next_obs['done']:
-                print("resetting env")
+                #print("resetting env")
                 #next_obs.update_(env.reset(random_seed=1)) # only overwriting keys returned by reset, i.e. 'observations'
-                next_obs.update_(env.reset(random_seed=1))
+                next_obs.update_(env.reset())
                 if args.do_render:
                     env_renderer.reset()
 
@@ -604,6 +684,9 @@ if __name__ == "__main__":
         )
         writer.add_scalar(
             "rewards/mean", rollout_data["rewards"].mean(), global_step
+        )
+        writer.add_scalar(
+            'rewards/max', rollout_data['rewards'].max(), global_step
         )
         writer.add_scalar(
             "action_freq/forward", (rollout_data['actions'] == 2).sum(), global_step
