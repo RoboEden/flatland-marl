@@ -38,13 +38,19 @@ class TreeLSTM(nn.Module):
         Takes Tensors encoding node features, a tree node adjacency_list, and the order in which
         the tree processing should proceed in node_order and edge_order.
         """
+        #print('shape of forest in treelstm: {}'.format(forest.shape))
         forest = forest.flatten(0, 2)
         adjacency_list = adjacency.flatten(0, 2)
         node_order = node_order.flatten(0, 2)
         edge_order = edge_order.flatten(0, 2)
-
+        #print('shape of forest in treelstm after flatten: {}'.format(forest.shape))
+        #print('node_order_shape after flatten: {}'.format(node_order.shape))
+        #print('unique elements in node order: {}'.format(node_order.unique().shape))
+        #print('shape of adjacency list: {}'.format(adjacency_list.shape))
+        #print('unique elements of adjacency list: {}'.format(adjacency_list.unique().shape))
         # Total number of nodes in every tree in the batch
         batch_size = node_order.shape[0]
+        #print('batch size: {}'.format(batch_size))
 
         # Retrive device the model is currently loaded on to generate h, c, and h_sum result buffers
         device = next(self.parameters()).device
@@ -174,7 +180,9 @@ class TreeLSTM(nn.Module):
             fc = fc.unflatten(0, (fc.shape[0] // 3, 3)).flatten(start_dim=1) # this is where we must 
             #print('fc_shape after flatten:{}'.format(fc.shape))
             c_reduce = self.W_c(fc)
-
+            #print('shape of node mask: {}'.format(node_mask.shape))
+            #print('max value of node m')
+            #print('shape of c: {}'.format(c.shape))
             c[node_mask, :] = i * u + c_reduce # here we calculate the sum
             #print('vector x: {}'.format(x))
             #print('subset of feature vector: {}'.format(features[parent_indexes, :]))

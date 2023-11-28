@@ -33,8 +33,6 @@ from flatland.envs.agent_utils import EnvAgent
 import numpy as np
 import pandas as pd
 
-
-
 from IPython.display import clear_output
 from matplotlib import pyplot as plt
 
@@ -55,8 +53,7 @@ def parse_args():
         help="if toggled, `torch.backends.cudnn.deterministic=False`")
     parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=False,
         help="if toggled, cuda will be enabled by default")
-    parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
-        help="if toggled, this experiment will be tracked with Weights and Biases")
+    parser.add_argument("--track", action=argparse.BooleanOptionalAction)
     parser.add_argument("--wandb-project-name", type=str, default="cleanRL",
         help="the wandb's project name")
     parser.add_argument("--wandb-entity", type=str, default=None,
@@ -69,13 +66,13 @@ def parse_args():
         help="the id of the environment")
     parser.add_argument("--num-agents", type= int, default = 1,
         help="number of agents in the environment")
-    parser.add_argument("--total-timesteps", type=int, default=100000,
+    parser.add_argument("--total-timesteps", type=int, default=10000000, #added zero for overnight
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
     parser.add_argument("--num-envs", type=int, default=1,
         help="the number of parallel game environments")
-    parser.add_argument("--num-steps", type=int, default=1000,
+    parser.add_argument("--num-steps", type=int, default=1000, #for rollout
         help="the number of steps to run in each environment per policy rollout")
     parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True, # try constant learning rate
         help="Toggle learning rate annealing for policy and value networks")
@@ -89,7 +86,7 @@ def parse_args():
         help="the K epochs to update the policy")
     parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles advantages normalization")
-    parser.add_argument("--clip-coef", type=float, default=0.3,
+    parser.add_argument("--clip-coef", type=float, default=0.2,
         help="the surrogate clipping coefficient")
     parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
@@ -106,6 +103,8 @@ def parse_args():
     parser.add_argument("--use-pretrained-network", action=argparse.BooleanOptionalAction)
     parser.add_argument('--no-training', action='store_true')
     parser.add_argument('--use-left-right-map', action='store_true')
+    parser.add_argument('--use-line-map', action=argparse.BooleanOptionalAction)
+    parser.add_argument('--use-meet-map', action=argparse.BooleanOptionalAction)
     parser.add_argument("--do-render", action='store_true')
     parser.add_argument('--use-arrival-reward', action='store_true')
     parser.add_argument('--freeze-embeddings', action=argparse.BooleanOptionalAction)
@@ -114,8 +113,11 @@ def parse_args():
     parser.add_argument('--use-start-reward', action=argparse.BooleanOptionalAction)
     parser.add_argument('--use-delay-reward', action=argparse.BooleanOptionalAction)
     parser.add_argument('--initialize-action-weights', action=argparse.BooleanOptionalAction)
+    parser.add_argument('--max-episode-steps', type=int, default=80)
+    parser.add_argument('--force-shortest-path', action=argparse.BooleanOptionalAction)
     parser.add_argument("--arrival-reward", type=int, default=1, 
         help="The reward to be returned when the train departs.")
+    parser.add_argument('--stepwise', action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -159,13 +161,17 @@ class RailEnvTd(RailEnv):
     def reset(self, tensordict=None, random_seed = None):
         ''' Extend default flatland reset by returning a tensordict. '''
         # get observation
+        #print("reset env")
         observations, _ = super().reset(random_seed=random_seed)
         
-        for agent_i, agent in enumerate(self.agents):
-            agent.earliest_departure = 0
-            agent.latest_arrival = 10
-        
-        self._max_episode_steps = 10
+        if args.max_episode_steps is not None:
+            for agent_i, agent in enumerate(self.agents):
+                agent.earliest_departure = 0
+                agent.latest_arrival = args.max_episode_steps
+            
+            self._max_episode_steps = args.max_episode_steps
+        else:
+            print('using default max episode steps')
         
         if tensordict is None:
             tensordict_out = TensorDict({}, batch_size=[])
@@ -180,10 +186,15 @@ class RailEnvTd(RailEnv):
             valid_actions, dtype=torch.bool
         ) 
         #tensordict_out["done"] = torch.tensor(False).type(torch.bool) # not done since just initialized
+        if args.force_shortest_path:
+            #print('shorestest path action: {}'.format((self.agents[0].get_shortest_path(self.distance_map)[0][1])))
+            tensordict_out['observations']['shortest_path_action'] = torch.reshape(torch.tensor(self.agents[0].get_shortest_path(self.distance_map)[0][1]).type(torch.int64), [1])
         return tensordict_out
 
     def step(self, tensordict):
         '''Extend default flatland step by returning a tensordict. '''
+        
+        #print("shortest path: {}".format((self.agents[0].get_shortest_path(self.distance_map)[0])))
         actions = {
             handle: action.item()
             for handle, action in enumerate(tensordict["actions"])
@@ -204,6 +215,9 @@ class RailEnvTd(RailEnv):
         observation_td["observations"]["valid_actions"] = torch.tensor(
             valid_actions, dtype=torch.bool
         )
+        if args.force_shortest_path:
+            print('shorestest path action: {}'.format((self.agents[0].get_shortest_path(self.distance_map)[0][1])))
+            observation_td['observations']['shortest_path_action'] = torch.reshape(torch.tensor(self.agents[0].get_shortest_path(self.distance_map)[0][1]).type(torch.int64), [1])
         return observation_td, rewards_td
 
     def update_step_rewards(self, i_agent):
@@ -275,7 +289,7 @@ class RailEnvTd(RailEnv):
                 
     def _handle_end_reward(self, agent: EnvAgent) -> int:
         if args.use_start_reward or args.use_arrival_reward or args.use_delay_reward:
-            #print("no end reward")
+            #print("end of episode status: {}".format(agent.state))
             return 0
         else:
             super()._handle_end_reward(self, agent)
@@ -329,101 +343,66 @@ right_switch_from_west = transitions.rotate_transition(right_switch_from_south, 
 right_switch_from_north = transitions.rotate_transition(right_switch_from_south, 180)
 right_switch_from_east = transitions.rotate_transition(right_switch_from_south, 270)
 
-map_height = 3
-map_width = 5
 
 def generate_custom_rail():
     if args.use_left_right_map:
-        if True: 
-            print("left right loop")
-            rail_map = np.array(
-                [[empty] + [right_turn_from_south] + [horizontal_straight] + [right_turn_from_west] + [empty]] +
-                [[left_turn_from_east] + [right_switch_from_east] + [horizontal_straight] + [left_switch_from_west] + [right_turn_from_west]] +
-                [[right_turn_from_east] + [horizontal_straight]*(3) + [left_turn_from_west]],
-            dtype=np.uint16)
-            train_stations = [
-                [((0,2), 0)],
-                [((2, 2), 0)],
-            ]
+        print("left right loop")
+        rail_map = np.array(
+            [[empty] + [right_turn_from_south] + [horizontal_straight] + [right_turn_from_west] + [empty]] +
+            [[left_turn_from_east] + [right_switch_from_east] + [horizontal_straight] + [left_switch_from_west] + [right_turn_from_west]] +
+            [[right_turn_from_east] + [horizontal_straight]*(3) + [left_turn_from_west]],
+        dtype=np.uint16)
+        train_stations = [
+            [((0,2), 0)],
+            [((2, 2), 0)],
+        ]
 
-            city_positions = [(0, 2), (2, 2)]
-            city_orientations = [1, 1]
+        city_positions = [(0, 2), (2, 2)]
+        city_orientations = [1, 1]
 
-            agents_hints = {
-                "city_positions": city_positions,
-                "train_stations": train_stations,
-                "city_orientations": city_orientations,
-            }
+        agents_hints = {
+            "city_positions": city_positions,
+            "train_stations": train_stations,
+            "city_orientations": city_orientations,
+        }
 
-            optionals = {"agents_hints": agents_hints}
+        optionals = {"agents_hints": agents_hints}
 
-            rail = GridTransitionMap(width=rail_map.shape[1], height=rail_map.shape[0], transitions=transitions)
-            rail.grid = rail_map
-            
-            return rail, optionals
-                
-        elif False:# : #np.random.binomial(1, 0.5):
-            print("north")
-            
-            rail_map = np.array(
-                [[empty] + [dead_end_from_south] + [empty]*(map_width-2)] +
-                [[empty] + [vertical_straight] + [empty]*(map_width-2)] +
-                [[left_turn_from_east] + [right_switch_from_east] + [horizontal_straight]*(map_width-3) + [left_turn_from_south]] +
-                [[left_turn_from_north] + [horizontal_straight]*(map_width - 2) + [left_turn_from_west]] +
-                [[empty]*map_width],
-            dtype=np.uint16)
-            
-            train_stations = [
-                [((2, map_width-2), 0)],
-                [((0, 1), 0)],
-            ]
+        rail = GridTransitionMap(width=rail_map.shape[1], height=rail_map.shape[0], transitions=transitions)
+        rail.grid = rail_map
+        
+        return rail, optionals
+    
+    if args.use_meet_map:
+        print("meet_map")
+        rail_map = np.array(
+            [[right_turn_from_south] + [horizontal_straight] + [left_turn_from_south] + [empty] * 2 + [right_turn_from_south] + [horizontal_straight] * 3 + [right_turn_from_west] + [empty] * 2 + [right_turn_from_south] + [horizontal_straight] + [right_turn_from_west]] +
+            [[right_turn_from_east] + [horizontal_straight] + [right_switch_from_east] + [horizontal_straight] * 2 + [left_switch_from_west] +  [horizontal_straight] * 3 + [right_switch_from_east] + [horizontal_straight] * 2 + [left_switch_from_west] + [horizontal_straight] + [left_turn_from_west]],
+        dtype=np.uint16)
+        train_stations = [
+            [((1,1), 0)],
+            [((1, 13), 0)],
+        ]
 
-            city_positions = [(2, map_width-2), (0, 1)]
-            city_orientations = [1, 0]
+        city_positions = [(1, 1), (1, 13)]
+        city_orientations = [1, 1]
 
-            agents_hints = {
-                "city_positions": city_positions,
-                "train_stations": train_stations,
-                "city_orientations": city_orientations,
-            }
+        agents_hints = {
+            "city_positions": city_positions,
+            "train_stations": train_stations,
+            "city_orientations": city_orientations,
+        }
 
-            optionals = {"agents_hints": agents_hints}
+        optionals = {"agents_hints": agents_hints}
 
-            rail = GridTransitionMap(width=rail_map.shape[1], height=rail_map.shape[0], transitions=transitions)
-            rail.grid = rail_map
-            
-            return rail, optionals
-            
-        else:
-            print("south")
-            rail_map = np.array(
-                [[empty]*map_width] +
-                [[right_turn_from_south] + [horizontal_straight]*(map_width - 2) + [right_turn_from_west]] +
-                [[right_turn_from_east] + [left_switch_from_east] + [horizontal_straight]*(map_width-3) + [right_turn_from_north]] +
-                [[empty] + [vertical_straight] + [empty]*(map_width-2)] +
-                [[empty] + [dead_end_from_south] + [empty]*(map_width-2)],
-            dtype=np.uint16)
-            
-            train_stations = [
-                [((2, map_width-2), 0)],
-                [((4, 1), 0)],
-            ]
+        rail = GridTransitionMap(width=rail_map.shape[1], height=rail_map.shape[0], transitions=transitions)
+        rail.grid = rail_map
+        
+        return rail, optionals
 
-            city_positions = [(2, map_width-2), (4, 1)]
-            city_orientations = [1, 0]
-
-            agents_hints = {
-                "city_positions": city_positions,
-                "train_stations": train_stations,
-                "city_orientations": city_orientations,
-            }
-
-            optionals = {"agents_hints": agents_hints}
-
-            rail = GridTransitionMap(width=rail_map.shape[1], height=rail_map.shape[0], transitions=transitions)
-            rail.grid = rail_map
-            return rail, optionals
-    else:
+    if args.use_line_map:
+        map_width=10
+        map_height=5
         rail_map = np.array(
             [[empty]*map_width] +
             [[empty]*map_width] +
@@ -465,34 +444,6 @@ class BaseLineGen(object):
     def __call__(self, *args, **kwargs):
         return self.generate(*args, **kwargs)
     
-def create_random_env():
-    """Create a random railEnv object
-    Taken from the flatland-marl demo
-    """
-    #rail, rail_map, optionals = generate_switch_rail()
-    return RailEnvTd(
-        number_of_agents=args.num_agents,
-        #width=rail_map.shape[1],
-        #height=rail_map.shape[0],
-        width = map_width,
-        height = map_height,
-        #rail_generator=rail_from_grid_transition_map(rail, optionals),
-        rail_generator=rail_from_grid_transition_map(*generate_custom_rail()),
-        line_generator=SparseLineGen(
-            speed_ratio_map={1.0: 1}, #0.5: '', 0.33: 1 / 4, 0.25: 1 / 4},
-            seed = 1
-        ),
-        malfunction_generator=ParamMalfunctionGen(
-            MalfunctionParameters(
-                malfunction_rate=1 / 4500, min_duration=20, max_duration=50
-            ),
-            
-        ),
-        obs_builder_object=TreeCutils(
-            fp.num_tree_obs_nodes, fp.tree_pred_path_depth
-        ),
-    )
-    
 if __name__ == "__main__":
     args = parse_args()
 
@@ -500,35 +451,87 @@ if __name__ == "__main__":
         f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     )
     if args.track:
-        import wandb
+        print('initializing tracking')
 
-        wandb.init(
-            project=args.wandb_project_name,
-            entity=args.wandb_entity,
-            sync_tensorboard=True,
-            config=vars(args),
-            name=run_name,
-            monitor_gym=True,
-            save_code=True,
+        writer = SummaryWriter(f"runs/{run_name}")
+        writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n%s"
+            % "\n".join([f"|{key}|{value}|" for key, value in vars(args).items()]),
         )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s"
-        % "\n".join([f"|{key}|{value}|" for key, value in vars(args).items()]),
-    )
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
-
+    
+    if args.use_left_right_map:
+        map_height = 3
+        map_width = 5
+    if args.use_meet_map:
+        map_height = 2
+        map_width = 15
+    if args.use_line_map:
+        map_height=5
+        map_width=10
+    
+    
+    if args.use_left_right_map or args.use_line_map or args.use_meet_map:
+        def create_random_env():
+            """Create a random railEnv object
+            Taken from the flatland-marl demo
+            """
+            #rail, rail_map, optionals = generate_switch_rail()
+            return RailEnvTd(
+                number_of_agents=args.num_agents,
+                #width=rail_map.shape[1],
+                #height=rail_map.shape[0],
+                width = map_width,
+                height = map_height,
+                #rail_generator=rail_from_grid_transition_map(rail, optionals),
+                rail_generator=rail_from_grid_transition_map(*generate_custom_rail()),
+                line_generator=SparseLineGen(
+                    speed_ratio_map={1.0: 1}, #0.5: '', 0.33: 1 / 4, 0.25: 1 / 4},
+                    seed = 1
+                ),
+                malfunction_generator=ParamMalfunctionGen(
+                    MalfunctionParameters(
+                        malfunction_rate=1 / 4500, min_duration=20, max_duration=50
+                    ),
+                    
+                ),
+                obs_builder_object=TreeCutils(
+                    fp.num_tree_obs_nodes, fp.tree_pred_path_depth
+                ),
+            )
+    else: 
+        def create_random_env():
+            return RailEnvTd(
+                number_of_agents=args.num_agents,
+                width=30,
+                height=35,
+                rail_generator=SparseRailGen(
+                    max_num_cities=3,
+                    grid_mode=False,
+                    max_rails_between_cities=2,
+                    max_rail_pairs_in_city=2,
+                ),
+                line_generator=SparseLineGen(
+                    speed_ratio_map={1.0: 1}
+                ),
+                malfunction_generator=ParamMalfunctionGen(
+                    MalfunctionParameters(
+                        malfunction_rate=1 / 4500, min_duration=20, max_duration=50
+                    )
+                ),
+                obs_builder_object=TreeCutils(fp.num_tree_obs_nodes, fp.tree_pred_path_depth),
+            )
     device = torch.device(
         "cuda" if torch.cuda.is_available() and args.cuda else "cpu"
     )
     print("device used: {}".format(device))
-
+    device = torch.device('cpu')
     env = create_random_env()
     
     if args.do_render:
@@ -552,7 +555,7 @@ if __name__ == "__main__":
     td_module = TensorDictModule(
         network,
         in_keys=["observations", "actions"],
-        out_keys=["actions", "logprobs", "entropy", "values", "valid_actions_probs"],
+        out_keys=["actions", "logprobs", "entropy", "values", "valid_actions_probs", "tree_embedding"],
     ).to(device)
     
     if args.no_training:
@@ -564,8 +567,8 @@ if __name__ == "__main__":
             param.requires_grad = False
         for param in td_module.transformer.parameters():
             param.requires_grad = False
-        for param in td_module.critic_net.parameters():
-            param.requires_grad = False
+        #for param in td_module.critic_net.parameters():
+        #    param.requires_grad = False
         for param in td_module.tree_lstm.parameters():
             param.requires_grad = False
             
@@ -577,8 +580,13 @@ if __name__ == "__main__":
                 print("init linear layer")
                 param.weight.data.normal_(mean=0.0, std=0.1)
                 param.bias.data.zero_()
+        for param in td_module.critic_net:
+            if isinstance(param, nn.Linear):
+                print("init linear layer")
+                param.weight.data.normal_(mean=0.0, std=0.1)
+                param.bias.data.zero_()
         #td_module.actor_net.apply(td_module._init_weights(td_module.actor_net))
-        print("initialized action weights")
+        print("initialized action and critic weights")
         
 
     optimizer = optim.Adam(
@@ -606,6 +614,7 @@ if __name__ == "__main__":
             "valid_actions": torch.zeros(
                 args.num_steps, args.num_agents, *env.action_space, dtype=torch.bool
             ),
+            'shortest_path_action': torch.zeros(args.num_steps, args.num_agents, 1, dtype = torch.int64)
         },
         batch_size=(args.num_steps, args.num_agents),
     )
@@ -615,8 +624,9 @@ if __name__ == "__main__":
     entropy = torch.zeros((args.num_steps), dtype = torch.float32)
     rewards = torch.zeros((args.num_steps, args.num_agents), dtype=torch.float32)
     done = torch.zeros((args.num_steps), dtype=torch.bool)
-    values = torch.zeros((args.num_steps, args.num_agents), dtype=torch.float32)
+    values = torch.zeros((args.num_steps), dtype=torch.float32)
     valid_actions_probs = torch.zeros((args.num_steps, args.num_agents, 5), dtype=torch.float32)
+    tree_embedding = torch.zeros((args.num_steps, args.num_agents, 128), dtype=torch.float32)
 
     rollout_data = TensorDict(
         {
@@ -628,6 +638,7 @@ if __name__ == "__main__":
             "done": done,
             "values": values,
             "valid_actions_probs": valid_actions_probs,
+            'tree_embedding': tree_embedding,
         },
         batch_size=[args.num_steps],
     )
@@ -638,6 +649,9 @@ if __name__ == "__main__":
     next_obs = env.reset(random_seed = 1)
     rollout_data = rollout_data.to(device)
     num_updates = args.total_timesteps // args.batch_size
+    print('total timesteps: {}'.format(args.total_timesteps))
+    print('batch size: {}'.format(args.batch_size))
+    print("num updates: {}".format(num_updates))
 
     for update in range(1, num_updates + 1):
         # Annealing the rate if instructed to do so.
@@ -651,20 +665,27 @@ if __name__ == "__main__":
             global_step += 1 * args.num_envs
             #print("logprobs shape: {}".format(next_obs['logprobs'].shape))
             #print("next obs: {}".format(next_obs))
+            #print('adjacency list: {}'.format(rollout_data['observations']['adjacency']))
             rollout_data[
                 step
             ].update(next_obs, inplace = True)# save for training, also includes the done
             #print("valid actions before step: {}".format(next_obs['observations']['valid_actions']))
             # ALGO LOGIC: action logic
+            #print('observations adjacency before step: {}'.format(rollout_data[step]['observations']['adjacency']))
+            #exit()
             with torch.no_grad():
                 rollout_data[[step]] = (td_module(rollout_data[[step]]))
+            #print('observations adjacency after step: {}'.format(rollout_data[step]['observations']['adjacency']))
+            #exit()
             #print("actions drawn from net: {}".format(rollout_data[step]['actions']))
             #print("action chosen: {}".format(rollout_data[step]['actions']))
             next_obs, rewards = env.step(rollout_data[step])
             #print("reward received: {}".format(rewards['rewards']))
             #print("rewards: {}".format(rewards['rewards']))
+            #print('rewards location where to be saved: {}'.format(rollout_data[step]['rewards']))
             rollout_data[step].update_(rewards) # save the rewards received for actions in current step
             #print("rewards saved: {}".format(rollout_data[step]['rewards']))
+            #exit()
             if next_obs['done']:
                 #print("resetting env")
                 #next_obs.update_(env.reset(random_seed=1)) # only overwriting keys returned by reset, i.e. 'observations'
@@ -674,41 +695,76 @@ if __name__ == "__main__":
 
             if args.do_render:
                 env_renderer.render_env(show=True, show_observations=False, show_predictions=False)
-            #print("valid actions: {}".format(next_obs['observations']['valid_actions']))
-            #input("Press Enter to continue...")
+                
+            if args.stepwise:
+                print("valid actions: {}".format(next_obs['observations']['valid_actions']))
+                input("Press Enter to continue...")
         
         
-        
-        writer.add_scalar(
-            "rewards/min", rollout_data["rewards"].min(), global_step
-        )
-        writer.add_scalar(
-            "rewards/mean", rollout_data["rewards"].mean(), global_step
-        )
-        writer.add_scalar(
-            'rewards/max', rollout_data['rewards'].max(), global_step
-        )
-        writer.add_scalar(
-            "action_freq/forward", (rollout_data['actions'] == 2).sum(), global_step
-        )
-        writer.add_scalar(
-            "action_freq/do_nothing",  (rollout_data['actions'] == 4).sum(), global_step
-        )
-        #print("valid action probs: {}".format(rollout_data['valid_actions_probs'].shape))
-        writer.add_scalar("action_probs/forward", (rollout_data['valid_actions_probs'][:,:,2].mean()), global_step)
-        writer.add_scalar("action_probs/do_nothing", (rollout_data['valid_actions_probs'][:,:,4].mean()), global_step)
+        if args.track:
+            writer.add_scalar(
+                "rewards/min", rollout_data["rewards"].min(), global_step
+            )
+            writer.add_scalar(
+                "rewards/mean", rollout_data["rewards"].mean(), global_step
+            )
+            writer.add_scalar(
+                'rewards/max', rollout_data['rewards'].max(), global_step
+            )
+            writer.add_scalar(
+                "action_freq/forward", (rollout_data['actions'] == 2).sum(), global_step
+            )
+            writer.add_scalar(
+                "action_freq/do_nothing",  (rollout_data['actions'] == 4).sum(), global_step
+            )
+            #print("valid action probs: {}".format(rollout_data['valid_actions_probs'].shape))
+            writer.add_scalar("action_probs/do_nothing", (rollout_data['valid_actions_probs'][:,:,0].mean()), global_step)
+            writer.add_scalar("action_probs/left", (rollout_data['valid_actions_probs'][:,:,1].mean()), global_step)
+            writer.add_scalar("action_probs/forward", (rollout_data['valid_actions_probs'][:,:,2].mean()), global_step)
+            writer.add_scalar("action_probs/right", (rollout_data['valid_actions_probs'][:,:,3].mean()), global_step)
+            writer.add_scalar("action_probs/stop_moving", (rollout_data['valid_actions_probs'][:,:,4].mean()), global_step)
+            
+            writer.add_scalar("action_probs_max/do_nothing", (rollout_data['valid_actions_probs'][:,:,0].max()), global_step)
+            writer.add_scalar("action_probs_max/left", (rollout_data['valid_actions_probs'][:,:,1].max()), global_step)
+            writer.add_scalar("action_probs_max/forward", (rollout_data['valid_actions_probs'][:,:,2].max()), global_step)
+            writer.add_scalar("action_probs_max/right", (rollout_data['valid_actions_probs'][:,:,3].max()), global_step)
+            writer.add_scalar("action_probs_max/stop_moving", (rollout_data['valid_actions_probs'][:,:,4].max()), global_step)
 
-        print("rollout actions frequency: {}".format(torch.bincount(rollout_data['actions'].squeeze(1))))
+        print('rollout actions shape: {}'.format(rollout_data['actions'].flatten().shape))
+        print("rollout actions frequency: {}".format(torch.bincount(rollout_data['actions'].flatten())))
+        #print('shape of rollout')
         
+        if args.num_agents==1 and False:
+        
+            tree_embedding_df = rollout_data['tree_embedding'].squeeze(1)
+            #print('tree embedding df shape: {}'.format(tree_embedding_df.shape))
+            tree_embedding_df = pd.DataFrame(tree_embedding_df.cpu().numpy())
+            
+            valid_actions_df = rollout_data['observations']['valid_actions'].squeeze(1)
+            valid_actions_df = pd.DataFrame(valid_actions_df.cpu().numpy())
+            #print(valid_actions_df)
+            
+            chosen_actions_df = rollout_data['actions'].squeeze(1)
+            chosen_actions_df=pd.DataFrame(chosen_actions_df.cpu().numpy())
+            
+            combined_df = pd.concat([tree_embedding_df, valid_actions_df, chosen_actions_df], axis=1)
+            combined_df.to_csv("combined_rollout_tree_embedding_" + str(update) + ".csv")
         
         next_obs = next_obs.to(device)
         next_obs['actions'] = torch.ones_like(rollout_data[0]['actions'])
+        
+        rollout_data['rewards_mean']=rollout_data['rewards'].mean(-1)
+        #print('shape of rewards after mean: {}'.format(rollout_data['rewards_mean'].shape))
+        
         # Calculate advantages
         with torch.no_grad():
             next_value = td_module(next_obs.unsqueeze(0))["values"]
  
-            advantages = torch.zeros_like(rollout_data['rewards']).to(device)
-            lastgaelam = torch.zeros(args.num_agents).to(device)
+            advantages = torch.zeros_like(rollout_data['rewards_mean']).to(device)
+            lastgaelam = torch.zeros(1).to(device)
+            
+            #print('shape of advantages: {}'.format(advantages.shape))
+            #print('rollout data values shape: {}'.format(rollout_data['values'].shape))
             for t in reversed(range(args.num_steps)):
                 if t == args.num_steps - 1:
                     nextnonterminal = 1.0 - next_obs['done'].item()
@@ -717,24 +773,28 @@ if __name__ == "__main__":
                     nextnonterminal = 1.0 - rollout_data["done"][t + 1].item()
                     nextvalues = rollout_data["values"][t + 1]
                 delta = (
-                    rollout_data["rewards"][t]
+                    rollout_data['rewards_mean'][t]
                     + args.gamma * nextvalues * nextnonterminal
                     - rollout_data["values"][t]
                 )
+
+                #print('shape of nextnonterminal: {}'.format(nextnonterminal.shape))
+                #()
                 advantages[t] = lastgaelam = (
                     delta
                     + args.gamma
                     * args.gae_lambda
                     * nextnonterminal
                     * lastgaelam
-                )
+                ).flatten()
             returns = advantages + rollout_data["values"]
-        writer.add_scalar("internal_values/advantages_max", advantages.max(), global_step)
-        writer.add_scalar("internal_values/advantages_min", advantages.min(), global_step)
-        #print(rollout_data['rewards'].shape)
+        if args.track:
+            writer.add_scalar("internal_values/advantages_max", advantages.max(), global_step)
+            writer.add_scalar("internal_values/advantages_min", advantages.min(), global_step)
+        #print(rollout_data['rewards_mean'].shape)
         #print(rollout_data['done'].shape)
         #print(rollout_data['values'].shape)
-        #print("rollout data: {}".format(torch.cat((advantages, returns, rollout_data['actions'], rollout_data['rewards'], rollout_data['done'].unsqueeze(-1), rollout_data['values']), dim=1)))
+        #print("rollout data: {}".format(torch.cat((advantages, returns, rollout_data['actions'], rollout_data['rewards_mean'], rollout_data['done'].unsqueeze(-1), rollout_data['values']), dim=1)))
         # Optimizing the policy and value network
         b_inds = np.arange(args.num_steps)
         clipfracs = []
@@ -749,7 +809,8 @@ if __name__ == "__main__":
                 updated_rollout_data = td_module(rollout_data[mb_inds])
                 #print("updated logprobs have autograd: {}".format(updated_rollout_data['logprobs'].requires_grad))
                 #print("updated values have autograd: {}".format(updated_rollout_data['values'].requires_grad))
-                #print("updated rollout data: {}".format(updated_rollout_data))
+                #print('original rollout data logprobs: {}'.format(rollout_data["logprobs"][mb_inds]))
+                #print("updated rollout data logprobs: {}".format(updated_rollout_data['logprobs']))
                 #print("shape of rollout data logprobs: {}".format(rollout_data['logprobs'][mb_inds].shape))
                 #print("shape of updated rollout data logrpobs: {}".format(updated_rollout_data['logprobs'].shape))
                 logratio = (
@@ -773,6 +834,7 @@ if __name__ == "__main__":
                     ]
 
                 mb_advantages = advantages[mb_inds]
+                #print('advantages: {}'.format(advantages))
                 if args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (
                         mb_advantages.std() + 1e-8
@@ -783,12 +845,19 @@ if __name__ == "__main__":
                 #print(ratio.cpu().squeeze(-1).numpy().shape)
                 #print(rollout_data[mb_inds]['actions'].cpu().squeeze(-1).numpy().shape)
                 #print("cat advangates: {}".format(torch.cat((mb_advantages, ratio, rollout_data[mb_inds]['actions']), dim=1)))
+                #print('mb advantages shape: {}'.format(mb_advantages.shape))
+
+                mb_advantages = mb_advantages.repeat_interleave(args.num_agents).reshape(ratio.shape)
+                #print('ratio shape: {}'.format(ratio.shape))
                 pg_loss1 = -mb_advantages * ratio
+                #print('ratio: {}'.format(ratio))
+                #print('pg loss 1: {}'.format(pg_loss1))
                 pg_loss2 = -mb_advantages * torch.clamp(
                     ratio, 1 - args.clip_coef, 1 + args.clip_coef
                 )
+                #print('pg loss 2: {}'.format(pg_loss2))
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
+                #print('pg loss: {}'.format(pg_loss))
                 # Value loss
                 newvalue = updated_rollout_data["values"]
                 if args.clip_vloss:
@@ -821,6 +890,17 @@ if __name__ == "__main__":
                         td_module.parameters(), args.max_grad_norm
                     )
                     optimizer.step()
+                    #print('loss: {}'.format(loss))
+
+                #for param in td_module.actor_net.parameters():
+                    #print(param.names)
+                    #print('param weights: {}'.format(param.data))
+                    #print('grad: {}'.format(param.grad))
+
+                #for param in td_module.actor_net:
+                    #if isinstance(param, nn.Linear):
+                        #print("actor layer: {}".format(param.weight.data))
+
 
 
             if args.target_kl is not None:
@@ -841,29 +921,30 @@ if __name__ == "__main__":
             
         del next_obs['actions']
         del next_obs['logprobs']
-        print('update nr: {}'.format(update))
+        print('update nr: {} out of'.format(update, num_updates))
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar(
-            "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
-        )
-        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
-        writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-        writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-        loss_total = (
-                    pg_loss.item()
-                    - args.ent_coef * entropy_loss.item()
-                    + v_loss.item() * args.vf_coef
-                )
-        writer.add_scalar("loss_share/policy", pg_loss.item()/loss_total, global_step)
-        writer.add_scalar("loss_share/value", v_loss.item() * args.vf_coef/loss_total, global_step)
-        writer.add_scalar("loss_share/entropy", entropy_loss.item() * args.ent_coef/loss_total, global_step)
-        writer.add_scalar("losses/total_loss", loss_total, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        if args.track:
+            writer.add_scalar(
+                "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
+            )
+            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+            writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+            writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+            writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
+            writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
+            writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
+            loss_total = (
+                        pg_loss.item()
+                        - args.ent_coef * entropy_loss.item()
+                        + v_loss.item() * args.vf_coef
+                    )
+            writer.add_scalar("loss_share/policy", pg_loss.item()/loss_total, global_step)
+            writer.add_scalar("loss_share/value", v_loss.item() * args.vf_coef/loss_total, global_step)
+            writer.add_scalar("loss_share/entropy", entropy_loss.item() * args.ent_coef/loss_total, global_step)
+            writer.add_scalar("losses/total_loss", loss_total, global_step)
+            print("SPS:", int(global_step / (time.time() - start_time)))
+            writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
         
-
-    writer.close()
+    if args.track:
+        writer.close()
 
