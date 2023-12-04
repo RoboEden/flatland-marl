@@ -6,7 +6,7 @@ authors = ["Emanuel Zwyssig"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.10"
+python = ">=3.10,<3.11"
 pybind11 = "^2.11.1"
 torch = "^2.1.0"
 tqdm = "^4.66.1"
@@ -26,6 +26,10 @@ mypy = "^1.6.1"
 gymnasium = "^0.29.1"
 flatland-rl = {path = "flatland-rl"}
 openpyxl = "^3.1.2"
+rich = "^13.7.0"
+optuna = "^3.4.0"
+dashboard = "^0.0.6"
+torchrl = "^0.2.1"
 
 
 [build-system]

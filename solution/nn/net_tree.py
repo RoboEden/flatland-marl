@@ -12,6 +12,9 @@ class Transformer(nn.Module):
     def __init__(self, embed_dim, num_heads):
         super(Transformer, self).__init__()
         self.attention = nn.MultiheadAttention(embed_dim, num_heads)
+        #for param in self.attention.parameters():
+        #    print(param.na)
+        #    print(isinstance(param, nn.Linear))
         print(f'embed dim: {embed_dim}')
         print(f'num_heads: {num_heads}')
         self.att_mlp = nn.Sequential(
@@ -154,6 +157,7 @@ class Network_td(nn.Module):
         # might be an idea to only do it for the available options
         #print('logits grad before inf: {}'.format(logits.requires_grad))
         valid_actions = obs_td['valid_actions']
+        logits_copy = logits.clone()
         #print('logits before inf: {}'.format(logits))
         logits[~valid_actions] = float('-inf')
         #print('logits require grad: {}'.format(logits.requires_grad))
@@ -187,7 +191,18 @@ class Network_td(nn.Module):
             #print('probs valid actions after zero: {}'.format(probs_valid_actions))
             #probs_valid_actions = Categorical(probs = probs_valid_actions)
             #print('probs valid actions: {}'.format(probs.probs))
-            actions = probs.sample()
+            try:
+                actions = probs.sample()
+            except Exception as e:
+                print(f'logits returned by network: {logits_copy}')
+                print('probs of dist: {}'.format(probs.probs))
+                print("logits taken from dist: {}".format(probs.logits))
+                print('valid_actions: {}'.format(valid_actions))
+                for param in self.actor_net.parameters():
+                    print('param weights: {}'.format(param.data))
+                    print('grad: {}'.format(param.grad))
+                exit()
+                
             #actions=obs_td['shortest_path_action']
         else:
             #print("used old actions")
@@ -230,6 +245,7 @@ class Network_td(nn.Module):
         #print('log probs actions squeeze shape: {}'.format(probs.log_prob(actions.squeeze(-1)).unsqueeze(-1).shape))
         #print("log probs in net before return: {}".format(probs.log_prob(actions.squeeze(-1)).unsqueeze(-1)))        
         #return actions, probs.log_prob(actions.squeeze(-1)).unsqueeze(-1), entropy, values, probs.probs, tree_embedding
+        assert(not torch.isnan(probs.log_prob(actions)).any(), "NA in action logits")
         return actions, probs.log_prob(actions), entropy.mean(1).view(-1), values, probs.probs, tree_embedding 
         #return self.actor(embedding, att_embedding), self.critic(embedding, att_embedding)
     
@@ -248,6 +264,7 @@ class Network_td(nn.Module):
         return critic_value
 
     def modify_adjacency(self, adjacency, _device):
+        adjacency = adjacency.clone() # to avoid side effects
         batch_size, n_agents, num_edges, _ = adjacency.shape
         #print('adjacency shape: {}'.format(adjacency.shape))
         #print('modify adjacency batch size: {}'.format(batch_size))

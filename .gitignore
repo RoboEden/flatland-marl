@@ -168,3 +168,9 @@ test*
 # tensorflow runs
 
 ./runs
+
+
+./rollout_history
+
+./model_checkpoints
+./trained_models

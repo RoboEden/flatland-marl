@@ -32,6 +32,7 @@ from flatland.envs.agent_utils import EnvAgent
 
 import numpy as np
 import pandas as pd
+import sys
 
 from IPython.display import clear_output
 from matplotlib import pyplot as plt
@@ -164,13 +165,14 @@ class RailEnvTd(RailEnv):
         #print("reset env")
         observations, _ = super().reset(random_seed=random_seed)
         
-        if args.max_episode_steps is not None:
-            for agent_i, agent in enumerate(self.agents):
-                agent.earliest_departure = 0
-                agent.latest_arrival = args.max_episode_steps
-            
-            self._max_episode_steps = args.max_episode_steps
-        else:
+        try: 
+            if args.max_episode_steps is not None:
+                for agent_i, agent in enumerate(self.agents):
+                    agent.earliest_departure = 0
+                    agent.latest_arrival = args.max_episode_steps
+                
+                self._max_episode_steps = args.max_episode_steps
+        except:
             print('using default max episode steps')
         
         if tensordict is None:
@@ -292,6 +294,7 @@ class RailEnvTd(RailEnv):
             #print("end of episode status: {}".format(agent.state))
             return 0
         else:
+            print(f'agent: {agent}')
             super()._handle_end_reward(self, agent)
             
 
@@ -445,6 +448,10 @@ class BaseLineGen(object):
         return self.generate(*args, **kwargs)
     
 if __name__ == "__main__":
+    print('starting main')
+    os.system('poetry env info')
+    print(f'check if in venv: {sys.prefix == sys.base_prefix}')
+    print(sys.argv)
     args = parse_args()
 
     run_name = (
@@ -547,16 +554,35 @@ if __name__ == "__main__":
     network = Network_td()
     print(args.use_pretrained_network)
     if args.use_pretrained_network:
-        model_path = "solution/policy/phase-III-50.pt"
-        loaded_model = torch.load(args.pretrained_network_path, map_location=torch.device(device))
-        network.load_state_dict(loaded_model)
-        print("loaded pretrained model")
-
-    td_module = TensorDictModule(
-        network,
-        in_keys=["observations", "actions"],
-        out_keys=["actions", "logprobs", "entropy", "values", "valid_actions_probs", "tree_embedding"],
-    ).to(device)
+        model_path = args.pretrained_network_path
+        assert (model_path.endswith('pt') or model_path.endswith('tar')), 'Network format not known.'
+        if model_path.endswith('pt'):
+            loaded_model = torch.load(args.pretrained_network_path, map_location=torch.device(device))
+            network.load_state_dict(loaded_model)
+            print("loaded pretrained model from .pt file")
+            td_module = TensorDictModule(
+                network,
+                in_keys=["observations", "actions"],
+                out_keys=["actions", "logprobs", "entropy", "values", "valid_actions_probs", "tree_embedding"],
+            ).to(device)
+        if model_path.endswith('tar'):
+            td_module = TensorDictModule(
+                network,
+                in_keys=["observations", "actions"],
+                out_keys=["actions", "logprobs", "entropy", "values", "valid_actions_probs", "tree_embedding"],
+            ).to(device)
+            checkpoint = torch.load(model_path)
+            print(f'type of state dict: {type(checkpoint["model_state_dict"])}')
+            #print([key for key, _ in checkpoint['model_state_dict']])
+            td_module.load_state_dict(checkpoint['model_state_dict'])
+            print('loaded pretrained model from .tar file')   
+    else:
+        print('training from scratch')
+        td_module = TensorDictModule(
+            network,
+            in_keys=["observations", "actions"],
+            out_keys=["actions", "logprobs", "entropy", "values", "valid_actions_probs", "tree_embedding"],
+        ).to(device)
     
     if args.no_training:
         for param in td_module.parameters():
@@ -590,7 +616,7 @@ if __name__ == "__main__":
         
 
     optimizer = optim.Adam(
-        td_module.parameters(), lr=args.learning_rate, eps=1e-5
+        td_module.parameters(), lr=args.learning_rate, eps=1e-5, weight_decay = 1e-5
     )
 
     #initialize storage for the rollouts
@@ -645,6 +671,7 @@ if __name__ == "__main__":
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
+    game_nr = 0
     start_time = time.time()
     next_obs = env.reset(random_seed = 1)
     rollout_data = rollout_data.to(device)
@@ -689,7 +716,18 @@ if __name__ == "__main__":
             if next_obs['done']:
                 #print("resetting env")
                 #next_obs.update_(env.reset(random_seed=1)) # only overwriting keys returned by reset, i.e. 'observations'
+                n_arrival = 0
+                for a in env.agents:
+                    if a.position is None and a.state != TrainState.READY_TO_DEPART:
+                        n_arrival += 1
+
+                arrival_ratio = n_arrival / args.num_agents
+                if args.track:
+                    writer.add_scalar(
+                    "game_metrics/arrival_ratio", arrival_ratio, game_nr
+                    )
                 next_obs.update_(env.reset())
+                game_nr += 1
                 if args.do_render:
                     env_renderer.reset()
 
@@ -731,7 +769,9 @@ if __name__ == "__main__":
             writer.add_scalar("action_probs_max/stop_moving", (rollout_data['valid_actions_probs'][:,:,4].max()), global_step)
 
         print('rollout actions shape: {}'.format(rollout_data['actions'].flatten().shape))
+        print(f'check rollout actoins shape: {rollout_data["actions"].shape}')
         print("rollout actions frequency: {}".format(torch.bincount(rollout_data['actions'].flatten())))
+        print(f'check rollout actoins shape: {rollout_data["actions"].shape}')
         #print('shape of rollout')
         
         if args.num_agents==1 and False:
@@ -792,9 +832,10 @@ if __name__ == "__main__":
             writer.add_scalar("internal_values/advantages_max", advantages.max(), global_step)
             writer.add_scalar("internal_values/advantages_min", advantages.min(), global_step)
         #print(rollout_data['rewards_mean'].shape)
+        print(f'advantages: {advantages}')
         #print(rollout_data['done'].shape)
         #print(rollout_data['values'].shape)
-        #print("rollout data: {}".format(torch.cat((advantages, returns, rollout_data['actions'], rollout_data['rewards_mean'], rollout_data['done'].unsqueeze(-1), rollout_data['values']), dim=1)))
+        #print("rollout data: {}".format(torch.cat((advantages, returns, rollout_data['actions'], rollout_data['rewards_mean'], rollout_data['done'].unsqueeze(-1), rollout_data['values']), dim=0)))
         # Optimizing the policy and value network
         b_inds = np.arange(args.num_steps)
         clipfracs = []
@@ -884,6 +925,7 @@ if __name__ == "__main__":
 
                 if not args.no_training:
                     #print("updating")
+                    #with torch.autograd.detect_anomaly():
                     optimizer.zero_grad()
                     loss.backward()
                     nn.utils.clip_grad_norm_(
@@ -944,7 +986,12 @@ if __name__ == "__main__":
             writer.add_scalar("losses/total_loss", loss_total, global_step)
             print("SPS:", int(global_step / (time.time() - start_time)))
             writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+            torch.save({
+                'model_state_dict': td_module.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }, f"model_checkpoints/{run_name}.tar")
         
     if args.track:
+        torch.save(td_module.state_dict(), f"trained_models/{run_name}.pt")
         writer.close()
 
