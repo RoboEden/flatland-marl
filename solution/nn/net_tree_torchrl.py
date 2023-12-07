@@ -4,7 +4,7 @@ from impl_config import FeatureParserConfig as fp
 from impl_config import NetworkConfig as ns
 from tensordict.tensordict import TensorDict
 from torch.distributions.categorical import Categorical
-
+import tensordict
 from .TreeLSTM import TreeLSTM
 
 class Transformer(nn.Module):
@@ -69,9 +69,11 @@ class embedding_net(nn.Module):
                 module.bias.data.zero_()
                 
     def forward(self, obs_td):
-        print(f'node attr shape: {obs_td["node_attr"].shape}')
+
         batch_size, n_agents, num_nodes, _ = obs_td['node_attr'].shape
-        device = next(self.parameters()).device
+        #print(f'node attr shape: {obs_td["node_attr"].shape}')
+        device = obs_td.device
+        
         adjacency = obs_td['adjacency'].clone()
         adjacency = self.modify_adjacency(adjacency, device)
         tree_embedding = self.tree_lstm(obs_td['node_attr'], 

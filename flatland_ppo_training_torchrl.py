@@ -66,7 +66,7 @@ torch.manual_seed(0)
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
-import timeit
+import time
 
 n_iters = 10
 
@@ -122,7 +122,7 @@ def parse_args():
         help="coefficient of the entropy")
     parser.add_argument("--vf-coef", type=float, default=0.0000001,
         help="coefficient of the value function")
-    parser.add_argument("--max-grad-norm", type=float, default=0.5,
+    parser.add_argument("--max-grad-norm", type=float, default=0.2,
         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target-kl", type=float, default=None,
         help="the target KL divergence threshold")
@@ -149,6 +149,8 @@ def parse_args():
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
+    print(f'minibatch size: {args.minibatch_size}')
+    print(f'batch size: {args.batch_size}')
     # fmt: on
     return args
 
@@ -334,7 +336,7 @@ class td_torch_rail(EnvBase):
     def __init__(self, env):
         super().__init__()        
         self.env = env
-        self.num_agents = 10
+        self.num_agents = env.get_num_agents()
         #print(f'self num agents after init: {self.num_agents}')
         #print('initializing torchrl env')
         #batch_size = torch.Size([1])
@@ -418,7 +420,7 @@ class td_torch_rail(EnvBase):
     
 def make_env():
     td_env = RailEnvTd(
-        number_of_agents=10,
+        number_of_agents=args.num_agents,
         width = 30,
         height = 35,
         rail_generator=SparseRailGen(
@@ -590,9 +592,7 @@ class BaseLineGen(object):
     
 if __name__ == "__main__":
     print('starting main')
-    os.system('poetry env info')
-    print(f'check if in venv: {sys.prefix == sys.base_prefix}')
-    print(sys.argv)
+    print(f'avail gpus: {[torch.cuda.device(i) for i in range(torch.cuda.device_count())]}')
     args = parse_args()
 
     run_name = (
@@ -618,20 +618,9 @@ if __name__ == "__main__":
         "cuda" if torch.cuda.is_available() and args.cuda else "cpu"
     )
     print("device used: {}".format(device))
-    device = 'cpu'
     
     env = ParallelEnv(args.num_envs, make_env)
-    
-    if args.do_render:
-        env_renderer = RenderTool(
-            env,
-            agent_render_variant=AgentRenderVariant.ONE_STEP_BEHIND,
-            show_debug=False,
-            screen_height=600,  # Adjust these parameters to fit your resolution
-            screen_width=800,
-        )
-    #env_renderer.render_env(show=True, show_observations=False, show_predictions=False)
-    #torch.manual_seed(0) # changed from 1
+    print('set up envs')
 
     embedding_net = embedding_net()
     common_module = TensorDictModule(
@@ -678,56 +667,41 @@ if __name__ == "__main__":
         common_module,
         policy,
         critic_module
-    )
-     
-    print(f'out keys of model actor: {model.get_policy_operator().out_keys}')
-        
-
+    ).to('cuda')
+    
+    print(f'device of critic module: {critic_module.device}')
     optimizer = optim.Adam(
         model.parameters(), lr=args.learning_rate, eps=1e-5, weight_decay = 1e-5
     )
     
-    rollout_data = TensorDict({}, batch_size = [args.num_steps, args.num_envs])
-    
-    # TRY NOT TO MODIFY: start the game
-    global_step = 0
-    game_nr = 0
-    start_time = time.time()
-    next_obs = env.reset()
-    print(next_obs)
-    rollout_data = rollout_data.to(device)
-    num_updates = args.total_timesteps // args.batch_size
-    print('total timesteps: {}'.format(args.total_timesteps))
-    print('batch size: {}'.format(args.batch_size))
-    print("num updates: {}".format(num_updates))
-    
-    print('defining policy')
-    print(f'env device: {env.device}')   
-    
+    print('optim done')
     #test_rollout = env.rollout(max_steps= 100, policy = model.get_policy_operator())
     #print('rollout successful')
+    
     collector = SyncDataCollector(
         env,
         model,
-        device=device,
-        storing_device=device,
-        frames_per_batch=100,
-        total_frames=1000,
+        device='cpu',
+        storing_device='cpu',
+        frames_per_batch=args.batch_size,
+        total_frames=args.total_timesteps,
     )
-    
-    replay_buffer = ReplayBuffer(
+    print('collector done')
+    from torchrl.data import TensorDictReplayBuffer
+    replay_buffer = TensorDictReplayBuffer(
         storage=LazyTensorStorage(
-            100, device=device
+            args.batch_size, device=device
         ),  # We store the frames_per_batch collected at each iteration
         sampler=SamplerWithoutReplacement(),
-        batch_size=50,  # We will sample minibatches of this size
+        batch_size=args.minibatch_size,  # We will sample minibatches of this size
     )
-    
+    print('replay buffer done')
     loss_module = ClipPPOLoss(
         actor=model.get_policy_operator(),
         critic=model.get_value_operator(),
-        clip_epsilon=0.2,
-        entropy_coef=0.01,
+        critic_coef=args.vf_coef,
+        clip_epsilon=args.clip_coef,
+        entropy_coef=args.ent_coef,
         normalize_advantage=False,  # Important to avoid normalizing across the agent dimension
     )
     
@@ -742,38 +716,96 @@ if __name__ == "__main__":
         done=("agents", "done"),
         terminated=("agents", "terminated"),
     )
-    loss_module.make_value_estimator(
-        ValueEstimators.GAE, gamma=0.99, lmbda=0.95
-    )  # We build GAE
-    GAE = loss_module.value_estimator
 
-    optim = torch.optim.Adam(loss_module.parameters(), 2.5e-4)
+    optim = torch.optim.Adam(loss_module.parameters(), lr=2.5e-4, weight_decay=1e-5)
     
     pbar = tqdm(total=n_iters, desc="episode_reward_mean = 0")
 
     episode_reward_mean_list = []
+    global_step = 0
+    start_time = time.time()
+    start_rollout = time.time()
     for tensordict_data in collector:
-        print(f'reward shape: {tensordict_data[("next", env.reward_key)]}')
+        rollout_duration = time.time() - start_rollout
+        training_start = time.time()
+        print(f'duration rollout: {time.time()-start_time}')
+        global_step += args.batch_size
+        print(f'global step: {global_step}')
+        print(f'device of tensordict data: {tensordict_data.device}')
+        #print(f'example of tensordict data: {tensordict_data}')
+        # log data about collector:
+        if args.track:
+            writer.add_scalar(
+                "rewards/min", tensordict_data[('next', 'agents', 'reward')].min(), global_step
+            )
+            writer.add_scalar(
+                "rewards/mean", tensordict_data[('next', 'agents', 'reward')].mean(), global_step
+            )
+            writer.add_scalar(
+                'rewards/max', tensordict_data[('next', 'agents', 'reward')].max(), global_step
+            )
+            #print("valid action probs: {}".format(rollout_data['valid_actions_probs'].shape))
+            writer.add_scalar("action_probs/do_nothing", tensordict_data[('agents', 'logits')][:,:,:,0].mean(), global_step)
+            writer.add_scalar("action_probs/left", tensordict_data[('agents', 'logits')][:,:,:,1].mean(), global_step)
+            writer.add_scalar("action_probs/forward", tensordict_data[('agents', 'logits')][:,:,:,2].mean(), global_step)
+            writer.add_scalar("action_probs/right", tensordict_data[('agents', 'logits')][:,:,:,3].mean(), global_step)
+            writer.add_scalar("action_probs/stop_moving", tensordict_data[('agents', 'logits')][:,:,:,4].mean(), global_step)
+            writer.add_scalar("charts/rollout_steps_per_second", args.batch_size/rollout_duration, global_step)
+            writer.add_scalar("charts/total_rollout_duration", rollout_duration, global_step)
+            
+            
         
+        tensordict_data = tensordict_data.to(device)
         tensordict_data.set(
             ("next", "agents", "reward"),
             tensordict_data.get(("next", "agents", "reward")).mean(-1))
-
-        # We need to expand the done and terminated to match the reward shape (this is expected by the value estimator)
-
+        
         with torch.no_grad():
-            GAE(
-                tensordict_data,
-                params=loss_module.critic_params,
-                target_params=loss_module.target_critic_params,
-            )  # Compute GAE and add it to the data
 
-        data_view = tensordict_data.reshape(-1)  # Flatten the batch size to shuffle data
+            lastgaelam = torch.zeros(args.num_envs).to(device)
+            rollout_lengths = int(args.batch_size/args.num_envs)
+            tensordict_data['advantage'] = torch.zeros_like(tensordict_data['state_value']).to('cuda')
+            #print('shape of advantages: {}'.format(advantages.shape))
+            #print('rollout data values shape: {}'.format(rollout_data['values'].shape))
+            for t in reversed(range(rollout_lengths)):
+                if t == rollout_lengths - 1:
+                    nextnonterminal = ~tensordict_data[('next', 'done')][:,t].squeeze()
+                    nextvalues = tensordict_data[('state_value')][:,t].squeeze()
+                else:
+                    nextnonterminal = ~tensordict_data[('next', 'done')][:,t].squeeze()
+                    nextvalues = tensordict_data[('state_value')][:,t].squeeze()
+                delta = (
+                    tensordict_data[('next', 'agents', 'reward')][:, t]
+                    + args.gamma * nextvalues * nextnonterminal
+                    - tensordict_data[('state_value')][:, t]
+                )
+
+
+                tensordict_data['advantage'][:,t] = lastgaelam = (
+                    delta
+                    + args.gamma
+                    * args.gae_lambda
+                    * nextnonterminal
+                    * lastgaelam
+                ).flatten()
+
+            tensordict_data['returns'] = tensordict_data['advantage'] + tensordict_data["state_value"]
+        tensordict_data['value_target'] = tensordict_data['state_value']
+        
+        if args.track:
+            writer.add_scalar("internal_values/advantages_max", tensordict_data['advantage'].max(), global_step)
+            writer.add_scalar("internal_values/advantages_min", tensordict_data['advantage'].min(), global_step)
+        
+        data_view = tensordict_data.reshape(-1)
+        print(f'shape of data view: {data_view.shape}')# Flatten the batch size to shuffle data
         replay_buffer.extend(data_view)
-
-        for _ in range(num_epochs):
-            for _ in range(frames_per_batch // minibatch_size):
+        print(f'device of model: {model.device}')
+        for n_epoch in range(args.update_epochs):
+            print(f'epoch nr: {n_epoch}')
+            for _ in range(args.num_minibatches):
                 subdata = replay_buffer.sample()
+                #print(f'shape of subdata {subdata.shape}')
+                #print(f'example of subdata: {subdata}')
                 loss_vals = loss_module(subdata)
 
                 loss_value = (
@@ -781,343 +813,36 @@ if __name__ == "__main__":
                     + loss_vals["loss_critic"]
                     + loss_vals["loss_entropy"]
                 )
-
+   
                 loss_value.backward()
 
                 torch.nn.utils.clip_grad_norm_(
-                    loss_module.parameters(), max_grad_norm
+                    loss_module.parameters(), args.max_grad_norm
                 )  # Optional
 
                 optim.step()
                 optim.zero_grad()
-
-        collector.update_policy_weights_()
-
-        # Logging
-        done = tensordict_data.get(("next", "agents", "done"))
-        episode_reward_mean = (
-            tensordict_data.get(("next", "agents", "episode_reward"))[done].mean().item()
-        )
-        episode_reward_mean_list.append(episode_reward_mean)
-        pbar.set_description(f"episode_reward_mean = {episode_reward_mean}", refresh=False)
-        pbar.update()
-    exit()
-    for update in range(1, num_updates + 1):
-        # Annealing the rate if instructed to do so.
-        if args.anneal_lr:
-            frac = 1.0 - (update - 1.0) / num_updates
-            lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
-
-        #rollout_data['agents']['action'] = torch.zeros_like(rollout_data['agents']['action'])
-        for step in range(0, args.num_steps):
-            global_step += 1 * args.num_envs
-            #print("logprobs shape: {}".format(next_obs['logprobs'].shape))
-            #print("next obs: {}".format(next_obs))
-            #print('adjacency list: {}'.format(rollout_data['observations']['adjacency']))
-            rollout_data[
-                step
-            ] = next_obs# save for training, also includes the done
-            #exit()
-            #print("valid actions before step: {}".format(next_obs['observations']['valid_actions']))
-            # ALGO LOGIC: action logic
-            #print('observations adjacency before step: {}'.format(rollout_data[step]['observations']['adjacency']))
-            print(f'random action: {env.rand_action()}')
-            print(f'rollout data at step 0: {rollout_data[step]}')
-            print(rollout_data[step]['agents']['observation']['adjacency'])
-            with torch.no_grad():
-                rollout_data[step] = (td_module(rollout_data[step]))
-            #print('observations adjacency after step: {}'.format(rollout_data[step]['observations']['adjacency']))
-            #exit()
-            #print("actions drawn from net: {}".format(rollout_data[step]['actions']))
-            #print("action chosen: {}".format(rollout_data[step]['actions']))
-            next_obs = env.step(rollout_data[step])
-            print(f'next obs: {next_obs}')
-            #print("reward received: {}".format(rewards['rewards']))
-            #print("rewards: {}".format(rewards['rewards']))
-            #print('rewards location where to be saved: {}'.format(rollout_data[step]['rewards']))
-            rollout_data[step].update_(rewards) # save the rewards received for actions in current step
-            #print("rewards saved: {}".format(rollout_data[step]['rewards']))
-            #exit()
-            if next_obs['done']:
-                #print("resetting env")
-                #next_obs.update_(env.reset(random_seed=1)) # only overwriting keys returned by reset, i.e. 'observations'
-                n_arrival = 0
-                for a in env.agents:
-                    if a.position is None and a.state != TrainState.READY_TO_DEPART:
-                        n_arrival += 1
-
-                arrival_ratio = n_arrival / args.num_agents
-                if args.track:
-                    writer.add_scalar(
-                    "game_metrics/arrival_ratio", arrival_ratio, game_nr
-                    )
-                next_obs.update_(env.reset())
-                game_nr += 1
-                if args.do_render:
-                    env_renderer.reset()
-
-            if args.do_render:
-                env_renderer.render_env(show=True, show_observations=False, show_predictions=False)
-                
-            if args.stepwise:
-                print("valid actions: {}".format(next_obs['observations']['valid_actions']))
-                input("Press Enter to continue...")
-        
-        
-        if args.track:
-            writer.add_scalar(
-                "rewards/min", rollout_data["rewards"].min(), global_step
-            )
-            writer.add_scalar(
-                "rewards/mean", rollout_data["rewards"].mean(), global_step
-            )
-            writer.add_scalar(
-                'rewards/max', rollout_data['rewards'].max(), global_step
-            )
-            writer.add_scalar(
-                "action_freq/forward", (rollout_data['actions'] == 2).sum(), global_step
-            )
-            writer.add_scalar(
-                "action_freq/do_nothing",  (rollout_data['actions'] == 4).sum(), global_step
-            )
-            #print("valid action probs: {}".format(rollout_data['valid_actions_probs'].shape))
-            writer.add_scalar("action_probs/do_nothing", (rollout_data['valid_actions_probs'][:,:,0].mean()), global_step)
-            writer.add_scalar("action_probs/left", (rollout_data['valid_actions_probs'][:,:,1].mean()), global_step)
-            writer.add_scalar("action_probs/forward", (rollout_data['valid_actions_probs'][:,:,2].mean()), global_step)
-            writer.add_scalar("action_probs/right", (rollout_data['valid_actions_probs'][:,:,3].mean()), global_step)
-            writer.add_scalar("action_probs/stop_moving", (rollout_data['valid_actions_probs'][:,:,4].mean()), global_step)
-            
-            writer.add_scalar("action_probs_max/do_nothing", (rollout_data['valid_actions_probs'][:,:,0].max()), global_step)
-            writer.add_scalar("action_probs_max/left", (rollout_data['valid_actions_probs'][:,:,1].max()), global_step)
-            writer.add_scalar("action_probs_max/forward", (rollout_data['valid_actions_probs'][:,:,2].max()), global_step)
-            writer.add_scalar("action_probs_max/right", (rollout_data['valid_actions_probs'][:,:,3].max()), global_step)
-            writer.add_scalar("action_probs_max/stop_moving", (rollout_data['valid_actions_probs'][:,:,4].max()), global_step)
-
-        print('rollout actions shape: {}'.format(rollout_data['actions'].flatten().shape))
-        print(f'check rollout actoins shape: {rollout_data["actions"].shape}')
-        print("rollout actions frequency: {}".format(torch.bincount(rollout_data['actions'].flatten())))
-        print(f'check rollout actoins shape: {rollout_data["actions"].shape}')
-        #print('shape of rollout')
-        
-        if args.num_agents==1 and False:
-        
-            tree_embedding_df = rollout_data['tree_embedding'].squeeze(1)
-            #print('tree embedding df shape: {}'.format(tree_embedding_df.shape))
-            tree_embedding_df = pd.DataFrame(tree_embedding_df.cpu().numpy())
-            
-            valid_actions_df = rollout_data['observations']['valid_actions'].squeeze(1)
-            valid_actions_df = pd.DataFrame(valid_actions_df.cpu().numpy())
-            #print(valid_actions_df)
-            
-            chosen_actions_df = rollout_data['actions'].squeeze(1)
-            chosen_actions_df=pd.DataFrame(chosen_actions_df.cpu().numpy())
-            
-            combined_df = pd.concat([tree_embedding_df, valid_actions_df, chosen_actions_df], axis=1)
-            combined_df.to_csv("combined_rollout_tree_embedding_" + str(update) + ".csv")
-        
-        next_obs = next_obs.to(device)
-        next_obs['actions'] = torch.ones_like(rollout_data[0]['actions'])
-        
-        rollout_data['rewards_mean']=rollout_data['rewards'].mean(-1)
-        #print('shape of rewards after mean: {}'.format(rollout_data['rewards_mean'].shape))
-        
-        # Calculate advantages
-        with torch.no_grad():
-            next_value = td_module(next_obs.unsqueeze(0))["values"]
- 
-            advantages = torch.zeros_like(rollout_data['rewards_mean']).to(device)
-            lastgaelam = torch.zeros(1).to(device)
-            
-            #print('shape of advantages: {}'.format(advantages.shape))
-            #print('rollout data values shape: {}'.format(rollout_data['values'].shape))
-            for t in reversed(range(args.num_steps)):
-                if t == args.num_steps - 1:
-                    nextnonterminal = 1.0 - next_obs['done'].item()
-                    nextvalues = next_value
-                else:
-                    nextnonterminal = 1.0 - rollout_data["done"][t + 1].item()
-                    nextvalues = rollout_data["values"][t + 1]
-                delta = (
-                    rollout_data['rewards_mean'][t]
-                    + args.gamma * nextvalues * nextnonterminal
-                    - rollout_data["values"][t]
-                )
-
-                #print('shape of nextnonterminal: {}'.format(nextnonterminal.shape))
-                #()
-                advantages[t] = lastgaelam = (
-                    delta
-                    + args.gamma
-                    * args.gae_lambda
-                    * nextnonterminal
-                    * lastgaelam
-                ).flatten()
-            returns = advantages + rollout_data["values"]
-        if args.track:
-            writer.add_scalar("internal_values/advantages_max", advantages.max(), global_step)
-            writer.add_scalar("internal_values/advantages_min", advantages.min(), global_step)
-        #print(rollout_data['rewards_mean'].shape)
-        print(f'advantages: {advantages}')
-        #print(rollout_data['done'].shape)
-        #print(rollout_data['values'].shape)
-        #print("rollout data: {}".format(torch.cat((advantages, returns, rollout_data['actions'], rollout_data['rewards_mean'], rollout_data['done'].unsqueeze(-1), rollout_data['values']), dim=0)))
-        # Optimizing the policy and value network
-        b_inds = np.arange(args.num_steps)
-        clipfracs = []
-        for epoch in range(args.update_epochs):
-            print("currently in epoch: {}".format(epoch))
-            np.random.shuffle(b_inds)
-            for start in range(0, args.batch_size, args.minibatch_size):
-                #print("start of mb: {}".format(start))
-                end = start + args.minibatch_size
-                mb_inds = b_inds[start:end]
-
-                updated_rollout_data = td_module(rollout_data[mb_inds])
-                #print("updated logprobs have autograd: {}".format(updated_rollout_data['logprobs'].requires_grad))
-                #print("updated values have autograd: {}".format(updated_rollout_data['values'].requires_grad))
-                #print('original rollout data logprobs: {}'.format(rollout_data["logprobs"][mb_inds]))
-                #print("updated rollout data logprobs: {}".format(updated_rollout_data['logprobs']))
-                #print("shape of rollout data logprobs: {}".format(rollout_data['logprobs'][mb_inds].shape))
-                #print("shape of updated rollout data logrpobs: {}".format(updated_rollout_data['logprobs'].shape))
-                logratio = (
-                    updated_rollout_data["logprobs"]
-                    - rollout_data["logprobs"][mb_inds]
-                )
-                #print("shape of logratio: {}".format(logratio.shape))
-                ratio = logratio.exp() # not changing at the moment, that makes senses
-                #print("prob ration in training: {}".format(ratio))
-                #print("ration mean: {}".format(ratio.max()))
-                #print("ratio has autograd: {}".format(ratio.requires_grad))
-                with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
-                    old_approx_kl = (-logratio).mean()
-                    approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [
-                        ((ratio - 1.0).abs() > args.clip_coef)
-                        .float()
-                        .mean()
-                        .item()
-                    ]
-
-                mb_advantages = advantages[mb_inds]
-                #print('advantages: {}'.format(advantages))
-                if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (
-                        mb_advantages.std() + 1e-8
-                    )
-
-                # Policy loss
-                #print(mb_advantages.cpu().squeeze(-1).numpy().shape)
-                #print(ratio.cpu().squeeze(-1).numpy().shape)
-                #print(rollout_data[mb_inds]['actions'].cpu().squeeze(-1).numpy().shape)
-                #print("cat advangates: {}".format(torch.cat((mb_advantages, ratio, rollout_data[mb_inds]['actions']), dim=1)))
-                #print('mb advantages shape: {}'.format(mb_advantages.shape))
-
-                mb_advantages = mb_advantages.repeat_interleave(args.num_agents).reshape(ratio.shape)
-                #print('ratio shape: {}'.format(ratio.shape))
-                pg_loss1 = -mb_advantages * ratio
-                #print('ratio: {}'.format(ratio))
-                #print('pg loss 1: {}'.format(pg_loss1))
-                pg_loss2 = -mb_advantages * torch.clamp(
-                    ratio, 1 - args.clip_coef, 1 + args.clip_coef
-                )
-                #print('pg loss 2: {}'.format(pg_loss2))
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-                #print('pg loss: {}'.format(pg_loss))
-                # Value loss
-                newvalue = updated_rollout_data["values"]
-                if args.clip_vloss:
-                    # not adapted for flatland yet
-                    v_loss_unclipped = (newvalue - returns[mb_inds]) ** 2
-                    v_clipped = rollout_data["values"][mb_inds] + torch.clamp(
-                        newvalue - rollout_data["values"][mb_inds],
-                        -args.clip_coef,
-                        args.clip_coef,
-                    )
-                    v_loss_clipped = (v_clipped - returns[mb_inds]) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-                else:
-                    v_loss = 0.5 * ((newvalue - returns[mb_inds]) ** 2).mean()
-                    # print('v_loss: {}'.format(v_loss))
-
-                entropy_loss = updated_rollout_data["entropy"].mean()
-                loss = (
-                    pg_loss
-                    - args.ent_coef * entropy_loss
-                    + v_loss * args.vf_coef
-                )
-
-                if not args.no_training:
-                    #print("updating")
-                    #with torch.autograd.detect_anomaly():
-                    optimizer.zero_grad()
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(
-                        td_module.parameters(), args.max_grad_norm
-                    )
-                    optimizer.step()
-                    #print('loss: {}'.format(loss))
-
-                #for param in td_module.actor_net.parameters():
-                    #print(param.names)
-                    #print('param weights: {}'.format(param.data))
-                    #print('grad: {}'.format(param.grad))
-
-                #for param in td_module.actor_net:
-                    #if isinstance(param, nn.Linear):
-                        #print("actor layer: {}".format(param.weight.data))
-
-
-
-            if args.target_kl is not None:
-                if approx_kl > args.target_kl:
-                    break
-        
-        """         for param in td_module.actor_net.parameters():
-            print("shape of param: {}".format(param.shape))
-            print("content of param: {}".format(param.data))
-            print("param has autogra: {}".format(param.requires_grad))
-            print(" param gradients: {}".format(param.grad))
-            
-        for param in td_module.critic_net.parameters():
-            print("critic shape of param: {}".format(param.shape))
-            print("content of param: {}".format(param.data))
-            print("param has autogra: {}".format(param.requires_grad))
-            print(" param gradients: {}".format(param.grad)) """
-            
-        del next_obs['actions']
-        del next_obs['logprobs']
-        print('update nr: {} out of'.format(update, num_updates))
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
+        print(f'last loss is: {loss_value}')
+        training_duration =  time.time() - training_start
         if args.track:
             writer.add_scalar(
                 "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
             )
-            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-            writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-            writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-            writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
-            writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-            writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-            loss_total = (
-                        pg_loss.item()
-                        - args.ent_coef * entropy_loss.item()
-                        + v_loss.item() * args.vf_coef
-                    )
-            writer.add_scalar("loss_share/policy", pg_loss.item()/loss_total, global_step)
-            writer.add_scalar("loss_share/value", v_loss.item() * args.vf_coef/loss_total, global_step)
-            writer.add_scalar("loss_share/entropy", entropy_loss.item() * args.ent_coef/loss_total, global_step)
-            writer.add_scalar("losses/total_loss", loss_total, global_step)
+            writer.add_scalar("losses/value_loss", loss_vals["loss_critic"], global_step)
+            writer.add_scalar("losses/policy_loss", loss_vals["loss_objective"], global_step)
+            writer.add_scalar("losses/entropy", loss_vals["loss_entropy"], global_step)
+
+            writer.add_scalar("losses/total_loss", loss_value, global_step)
             print("SPS:", int(global_step / (time.time() - start_time)))
             writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-            torch.save({
-                'model_state_dict': td_module.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, f"model_checkpoints/{run_name}.tar")
+            writer.add_scalar("charts/training_speed", args.batch_size*args.update_epochs / training_duration, global_step)
+            writer.add_scalar("charts/total_training_duration", training_duration, global_step)
+            
         
-    if args.track:
-        torch.save(td_module.state_dict(), f"trained_models/{run_name}.pt")
-        writer.close()
+                
+        collector.update_policy_weights_()
 
+        
+        start_rollout = time.time()
+        # Logging
+ 

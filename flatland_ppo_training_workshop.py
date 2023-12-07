@@ -537,8 +537,9 @@ if __name__ == "__main__":
     device = torch.device(
         "cuda" if torch.cuda.is_available() and args.cuda else "cpu"
     )
+    #device = 'cpu'
     print("device used: {}".format(device))
-    device = torch.device('cpu')
+    #device = torch.device('cpu')
     env = create_random_env()
     
     if args.do_render:
@@ -688,6 +689,7 @@ if __name__ == "__main__":
             optimizer.param_groups[0]["lr"] = lrnow
 
         rollout_data['actions'] = torch.zeros_like(rollout_data['actions'])
+        rollout_start = time.time()
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs
             #print("logprobs shape: {}".format(next_obs['logprobs'].shape))
@@ -738,6 +740,8 @@ if __name__ == "__main__":
                 print("valid actions: {}".format(next_obs['observations']['valid_actions']))
                 input("Press Enter to continue...")
         
+        rollout_duration = time.time()-rollout_start
+        print(f'duration rollout: {rollout_duration}')
         
         if args.track:
             writer.add_scalar(
@@ -767,13 +771,17 @@ if __name__ == "__main__":
             writer.add_scalar("action_probs_max/forward", (rollout_data['valid_actions_probs'][:,:,2].max()), global_step)
             writer.add_scalar("action_probs_max/right", (rollout_data['valid_actions_probs'][:,:,3].max()), global_step)
             writer.add_scalar("action_probs_max/stop_moving", (rollout_data['valid_actions_probs'][:,:,4].max()), global_step)
+            writer.add_scalar("charts/rollout_steps_per_second", args.batch_size/rollout_duration, global_step)
+            writer.add_scalar("charts/total_rollout_duration", rollout_duration, global_step)
+            
+            # add value to tensorboard
 
         print('rollout actions shape: {}'.format(rollout_data['actions'].flatten().shape))
         print(f'check rollout actoins shape: {rollout_data["actions"].shape}')
         print("rollout actions frequency: {}".format(torch.bincount(rollout_data['actions'].flatten())))
         print(f'check rollout actoins shape: {rollout_data["actions"].shape}')
         #print('shape of rollout')
-        
+        training_start = time.time()
         if args.num_agents==1 and False:
         
             tree_embedding_df = rollout_data['tree_embedding'].squeeze(1)
@@ -831,6 +839,7 @@ if __name__ == "__main__":
         if args.track:
             writer.add_scalar("internal_values/advantages_max", advantages.max(), global_step)
             writer.add_scalar("internal_values/advantages_min", advantages.min(), global_step)
+            writer.add_scalar("internal_values/values", rollout_data['values'].mean(), global_step)
         #print(rollout_data['rewards_mean'].shape)
         print(f'advantages: {advantages}')
         #print(rollout_data['done'].shape)
@@ -964,6 +973,7 @@ if __name__ == "__main__":
         del next_obs['actions']
         del next_obs['logprobs']
         print('update nr: {} out of'.format(update, num_updates))
+        training_duration = time.time() - training_start
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if args.track:
             writer.add_scalar(
@@ -986,10 +996,13 @@ if __name__ == "__main__":
             writer.add_scalar("losses/total_loss", loss_total, global_step)
             print("SPS:", int(global_step / (time.time() - start_time)))
             writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+            writer.add_scalar("charts/training_speed", args.batch_size*args.update_epochs / training_duration, global_step)
+            writer.add_scalar("charts/total_training_duration", training_duration, global_step)
             torch.save({
                 'model_state_dict': td_module.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, f"model_checkpoints/{run_name}.tar")
+        print(f'duration update: {time.time()-start_time}')
         
     if args.track:
         torch.save(td_module.state_dict(), f"trained_models/{run_name}.pt")

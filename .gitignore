@@ -170,7 +170,7 @@ test*
 ./runs
 
 
-./rollout_history
+rollout_history/
 
-./model_checkpoints
-./trained_models
+model_checkpoints/
+trained_models/
