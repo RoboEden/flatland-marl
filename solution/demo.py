@@ -109,15 +109,7 @@ if __name__ == "__main__":
     #action_history = []
     # start step loop
     obs = env_wrapper.reset()
-    print('type of observations {}'.format(type(obs)))
-    print('len of observations {}'.format(len(obs)))
-    print('len of observations[0]: {}'.format(len(obs[0])))
-    print((obs[0]['node_order']).shape)
-    print('shape of agent_attr: {}'.format(obs[0]['agent_attr'].shape))
-    print('shape of forest: {}'.format(obs[0]['forest'].shape))
-    print('shape of adjacency: {}'.format(obs[0]['adjacency'].shape)) 
-    print('shape of node order: {}'.format(obs[0]['node_order'].shape)) 
-    print('shape of edge order: {}'.format(obs[0]['edge_order'].shape)) 
+
     while True:
         va = env_wrapper.get_valid_actions()
         action = actor.get_actions(obs, va, n_agents)
@@ -138,6 +130,7 @@ if __name__ == "__main__":
             video_writer.write(frame)
 
         if done["__all__"]:
+            print(f'env reward dict at end: {env_wrapper.env.rewards_dict.values()}')
             if args.save_video is not None:
                 video_writer.close()
                 print(f"Write video to {args.save_video}")
@@ -146,7 +139,7 @@ if __name__ == "__main__":
             print(f"TOTAL_REW: {total_reward}")
             print(f"NORM_REW: {norm_reward:.4f}")
             print(f"ARR_RATIO: {arrival_ratio*100:.2f}%")
-            #break
+            break
         #break
         
     #print(pd.DataFrame(action_history).sum(axis = 0))

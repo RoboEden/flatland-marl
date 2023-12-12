@@ -98,6 +98,8 @@ class embedding_net(nn.Module):
         #print('id tree: {}'.format(id_tree))
         #print('id tree shape: {}'.format(id_tree.shape))
         id_nodes = id_tree.view(batch_size, n_agents, 1)    
+        # try non masked version
+        
         adjacency[adjacency == -2] = (
             -batch_size * n_agents * num_nodes
         )  
@@ -120,10 +122,14 @@ class actor_net(nn.Module):
         )
         self.apply(self._init_weights)
     
-    def forward(self, embedding, att_embedding):
+    def forward(self, embedding, att_embedding, valid_actions):
         #print('in actor func')
         worker_action = torch.cat([embedding, att_embedding], dim=-1)
         worker_action = self.actor_net(worker_action)
+        #print(f'worker action: {worker_action}')
+        #print(f'valid action: {valid_actions}')
+        worker_action[~valid_actions] = float('-inf')
+        #print(f'modified worker actions: {worker_action}')
         return worker_action
     
     def _init_weights(self, module):

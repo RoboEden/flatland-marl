@@ -16,13 +16,13 @@ class Actor:
         # obs = torch.from_numpy(np.array(obs)).float()
         feature = self.get_feature(obs_list)
         output_of_net = self.net(*feature) 
-        print('length of net: {}'.format(len(output_of_net)))
+        #print('length of net: {}'.format(len(output_of_net)))
         #print('shape of output [0]: {}'.format(output_of_net[0]))
         #logits = self.net(*feature)[0][0] # here we just take actions  
         logits = output_of_net[0][0] #first zero returns, second zero is taking the actor tensor out of the list it's in
-        print('logits before squeeze: {}'.format(logits.shape))
+        #print('logits before squeeze: {}'.format(logits.shape))
         logits = logits.squeeze().detach().numpy()
-        print('logits after squeeze: {}'.format(logits.shape))
+        #print('logits after squeeze: {}'.format(logits.shape))
         actions = dict()
         valid_actions = np.array(valid_actions)
         for i in range(n_agents):
@@ -76,5 +76,5 @@ class Actor:
             dtype=torch.int64
         )
 
-        print('node order after get_features: {}'.format(node_order.shape))
+        #print('node order after get_features: {}'.format(node_order.shape))
         return agents_attr, forest, adjacency, node_order, edge_order

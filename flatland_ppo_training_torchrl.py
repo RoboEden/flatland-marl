@@ -47,10 +47,13 @@ from torchrl.data import CompositeSpec, UnboundedContinuousTensorSpec, DiscreteT
 import torch
 
 from tensordict.tensordict import TensorDict
+from tensordict.nn import InteractionType
 from torchrl.envs import ParallelEnv, SerialEnv
 from torchrl.modules import MultiAgentMLP, ProbabilisticActor
+from tensordict.nn import ProbabilisticTensorDictSequential
 
 from torchrl.objectives import ClipPPOLoss, ValueEstimators
+from torch.nn import MSELoss, SmoothL1Loss
 
 from torchrl.collectors import SyncDataCollector
 from torchrl.data.replay_buffers import ReplayBuffer
@@ -66,7 +69,12 @@ torch.manual_seed(0)
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
+from time import sleep
+
+
 import time
+
+from flatland.envs.agent_chains import MotionCheck
 
 n_iters = 10
 
@@ -136,16 +144,19 @@ def parse_args():
     parser.add_argument("--do-render", action='store_true')
     parser.add_argument('--use-arrival-reward', action='store_true')
     parser.add_argument('--freeze-embeddings', action=argparse.BooleanOptionalAction)
-    parser.add_argument("--use-env-reward", type=bool, default=False,
+    parser.add_argument("--env-reward-coef", type=float, default=1,
         help="Toggles whether to use the default flatland env reward at each step")
-    parser.add_argument('--use-start-reward', action=argparse.BooleanOptionalAction)
-    parser.add_argument('--use-delay-reward', action=argparse.BooleanOptionalAction)
+    parser.add_argument('--departure-reward-coef', type=float, default=0)
+    parser.add_argument('--arrival-reward-coef', type=float, default=5)
+    parser.add_argument('--deadlock-penalty-coef', type=float, default=0)
     parser.add_argument('--initialize-action-weights', action=argparse.BooleanOptionalAction)
-    parser.add_argument('--max-episode-steps', type=int, default=80)
+    parser.add_argument('--max-episode-steps', type=int, default=None)
     parser.add_argument('--force-shortest-path', action=argparse.BooleanOptionalAction)
     parser.add_argument("--arrival-reward", type=int, default=1, 
         help="The reward to be returned when the train departs.")
     parser.add_argument('--stepwise', action=argparse.BooleanOptionalAction)
+    parser.add_argument('--map-width', type=int, default=30)
+    parser.add_argument('--map-height', type=int, default=35)
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -193,17 +204,15 @@ class RailEnvTd(RailEnv):
         # get observation
         #print("entering reset env")
         observations, _ = super().reset(random_seed=random_seed)
-        
-        try: 
-            if True:
-                for agent_i, agent in enumerate(self.agents):
-                    agent.earliest_departure = 0
-                    agent.latest_arrival = args.max_episode_steps
-                
-                self._max_episode_steps = args.max_episode_steps
-        except:
-            #print('using default max episode steps')
-            pass
+
+        # use default for the moment, give enough time to train
+        """ if args.max_episode_steps is not None:
+            for agent_i, agent in enumerate(self.agents):
+                agent.earliest_departure = 0
+                agent.latest_arrival = args.max_episode_steps
+            
+            self._max_episode_steps = args.max_episode_steps """
+
         
         if tensordict is None:
             tensordict_out = TensorDict({}, batch_size=[])
@@ -218,19 +227,13 @@ class RailEnvTd(RailEnv):
         tensordict_out["agents"]["observation"]["valid_actions"] = torch.tensor(
             valid_actions, dtype=torch.bool
         ) 
-        #tensordict_out["done"] = torch.tensor(False).type(torch.bool) # not done since just initialized
-        if False:
-            #print('shorestest path action: {}'.format((self.agents[0].get_shortest_path(self.distance_map)[0][1])))
-            tensordict_out['observations']['shortest_path_action'] = torch.reshape(torch.tensor(self.agents[0].get_shortest_path(self.distance_map)[0][1]).type(torch.int64), [1])
         return tensordict_out
 
     def step(self, tensordict):
         '''Extend default flatland step by returning a tensordict. '''
         #print('entering step function')
         #print("shortest path: {}".format((self.agents[0].get_shortest_path(self.distance_map)[0])))
-        for handle, action in enumerate(tensordict['agents']['action']):
-            #print(handle, action.flatten())
-            pass
+
         actions = {
             handle: action.item()
             for handle, action in enumerate(tensordict['agents']["action"].flatten())
@@ -242,7 +245,7 @@ class RailEnvTd(RailEnv):
             _,
             valid_actions,
         ) = self.obs_builder.get_properties()
-        return_td = TensorDict({'agents': TensorDict({}, [])}, batch_size=[])
+        return_td = TensorDict({'agents': TensorDict({}, []), 'stats': TensorDict({}, [])}, batch_size=[])
         #rewards_td = TensorDict({'agents': TensorDict({}, [])}, batch_size=[])
         return_td['agents']["observation"] = self.obs_to_td(observations)
         return_td['agents']["reward"] = torch.tensor(
@@ -252,28 +255,32 @@ class RailEnvTd(RailEnv):
         return_td['agents']["observation"]["valid_actions"] = torch.tensor(
             valid_actions, dtype=torch.bool
         )
-        if False:
-            print('shorestest path action: {}'.format((self.agents[0].get_shortest_path(self.distance_map)[0][1])))
-            observation_td['observations']['shortest_path_action'] = torch.reshape(torch.tensor(self.agents[0].get_shortest_path(self.distance_map)[0][1]).type(torch.int64), [1])
+        n_arrival = 0
+        for a in self.agents:
+            if a.position is None and a.state != TrainState.READY_TO_DEPART:
+                n_arrival += 1
+        return_td[("stats", "arrival_ratio")] = torch.tensor(n_arrival/self.number_of_agents, dtype = torch.float32)
+        n_deadlocked_agents = len(self.motionCheck.find_swaps())
+        return_td[("stats", "deadlock_ratio")] = torch.tensor(n_deadlocked_agents/self.number_of_agents, dtype = torch.float32)
+        print(f'rewards: {return_td[("agents", "reward")]}')
         return return_td
 
     def update_step_rewards(self, i_agent):
-        
-        if False:
-            print("using env reward")
-            reward = None
-            agent = self.agents[i_agent]
+        agent = self.agents[i_agent]
+        env_reward = arrival_reward = n_deadlocks = departure_reward = 0
+        if args.env_reward_coef != 0:
+            env_reward = None
             # agent done? (arrival_time is not None)
             if agent.state == TrainState.DONE:
                 # if agent arrived earlier or on time = 0
                 # if agent arrived later = -ve reward based on how late
-                reward = min(agent.latest_arrival - agent.arrival_time, 0)
+                env_reward = min(agent.latest_arrival - agent.arrival_time, 0)
 
             # Agents not done (arrival_time is None)
             else:
                 # CANCELLED check (never departed)
                 if agent.state.is_off_map_state():
-                    reward = (
+                    env_reward = (
                         -1
                         * self.cancellation_factor
                         * (
@@ -286,44 +293,23 @@ class RailEnvTd(RailEnv):
 
                 # Departed but never reached
                 if agent.state.is_on_map_state():
-                    reward = agent.get_current_delay(
-                        self._elapsed_steps, self.distance_map
-                    )
-            self.rewards_dict[i_agent] += reward
+                    env_reward = agent.get_current_delay(self._elapsed_steps, self.distance_map)
         
-        if False:
-            print("using start reward")
-            #print(self._elapsed_steps)
-            agent = self.agents[i_agent]
-            if agent.state.is_on_map_state() and agent.state_machine.previous_state.is_off_map_state():
-                self.rewards_dict[i_agent] = args.start_reward
-            #if agent.state.is_off_map_state() and agent.state_machine.previous_state.is_off_map_state() and self._elapsed_steps > 1:
-            #    self.rewards_dict[i_agent] = args.start_reward
+        if args.arrival_reward != 0:
+            if agent.position is None and agent.state != TrainState.READY_TO_DEPART and agent.state_machine.previous_state != TrainState.DONE: 
+                # only give arrival reward once
+                arrival_reward = 1
+        
+        if args.deadlock_penalty_coef != 0:
+            n_deadlocks = len(self.motionCheck.find_swaps()) 
             
-        if False:
-            agent = self.agents[i_agent]
-            #print("shortest path: {}".format(agent.get_shortest_path(self.distance_map)))
-            print('agent delay: {}'.format((agent.get_current_delay(self._elapsed_steps, self.distance_map))))
-            #print("agent position: {}".format(agent.position))
-            #print("agent target: {}".format(agent.target))
-            if agent.state == TrainState.DONE:
-                #print("agent position equal targer: {}".format(agent.position == agent.target))
-                print("reward for arriving")
-                self.rewards_dict[i_agent] = args.arrival_reward
-            if agent.get_travel_time_on_shortest_path(self.distance_map) > (self._max_episode_steps-self._elapsed_steps + 2):
-                #print(self._max_episode_steps - self._elapsed_steps)
-                #print(agent.get_travel_time_on_shortest_path(self.distance_map))
-                #print("penalty for wrong choice")
-                #print(agent.get_travel_time_on_shortest_path(self.distance_map) - self._elapsed_steps)
-                #print(agent.get_current_delay(self._elapsed_steps, self.distance_map))
-                self.rewards_dict[i_agent] = agent.get_travel_time_on_shortest_path(self.distance_map) - self._elapsed_steps # not too big penalty, so trains still depart
-            #if agent.state==TrainState.READY_TO_DEPART and self._elapsed_steps > 2:
-            #    print("penalty for waiting")
-            #    self.rewards_dict[i_agent] = -args.arrival_reward
-        if True:
-            agent=self.agents[i_agent]
-            self.rewards_dict[i_agent]=agent.get_current_delay(self._elapsed_steps, self.distance_map)
-                
+        if args.departure_reward_coef != 0:
+            if (agent.state.is_on_map_state() and agent.state_machine.previous_state.is_off_map_state()):
+                departure_reward = 1
+        print(args.arrival_reward_coef)
+            
+        self.rewards_dict[i_agent] += args.env_reward_coef*env_reward + args.arrival_reward_coef*arrival_reward + args.deadlock_penalty_coef*n_deadlocks + args.departure_reward_coef*departure_reward
+
     def _handle_end_reward(self, agent: EnvAgent) -> int:
         if True:
             #print("end of episode status: {}".format(agent.state))
@@ -342,6 +328,13 @@ class td_torch_rail(EnvBase):
         #batch_size = torch.Size([1])
         #print('batch size: {}'.format(batch_size))
         self._make_spec()
+        """         self.env_renderer = RenderTool(
+            self.env,
+            agent_render_variant=AgentRenderVariant.ONE_STEP_BEHIND,
+            show_debug=False,
+            screen_height=600,  # Adjust these parameters to fit your resolution
+            screen_width=800,
+        ) """
         
     def _set_seed(self, seed: Optional[int]):
         rng = torch.manual_seed(seed)
@@ -379,6 +372,11 @@ class td_torch_rail(EnvBase):
                 shape = [self.num_agents]),
             shape = []
             ),
+            stats = CompositeSpec(
+                arrival_ratio = UnboundedContinuousTensorSpec(shape = [], dtype = torch.float32),
+                deadlock_ratio = UnboundedContinuousTensorSpec(shape = [], dtype = torch.float32),
+                shape = []
+            ),
         shape = []
         )
         self.action_spec = CompositeSpec(
@@ -411,18 +409,20 @@ class td_torch_rail(EnvBase):
         
     def _reset(self, tensordict = None):
         #print('resetting with _reset function')
+        #self.env_renderer.reset()
         return self.env.reset()
     
     def _step(self, tensordict):
         #print('actions: {}'.format(tensordict['action']))
         #actions_dict = {handle: action.item() for handle, action in enumerate(tensordict['action'])}
+        #self.env_renderer.render_env(show=True, show_observations=False, show_predictions=False)
         return self.env.step(tensordict)
     
 def make_env():
     td_env = RailEnvTd(
         number_of_agents=args.num_agents,
-        width = 30,
-        height = 35,
+        width = args.map_width,
+        height = args.map_height,
         rail_generator=SparseRailGen(
             max_num_cities=3,
             grid_mode=False,
@@ -430,7 +430,7 @@ def make_env():
             max_rail_pairs_in_city=2,
         ),
         line_generator=SparseLineGen(
-            speed_ratio_map={1.0: 1 / 4, 0.5: 1 / 4, 0.33: 1 / 4, 0.25: 1 / 4}
+            speed_ratio_map={1.0: 1}
         ),
         malfunction_generator=ParamMalfunctionGen(
             MalfunctionParameters(
@@ -577,24 +577,17 @@ def generate_custom_rail():
         rail.grid = rail_map
         
         return rail, optionals
-
-class BaseLineGen(object):
-    def __init__(self, speed_ratio_map: Mapping[float, float] = None, seed: int = 1):
-        self.speed_ratio_map = speed_ratio_map
-        self.seed = seed
-
-    def generate(self, rail: GridTransitionMap, num_agents: int, hints: Any=None, num_resets: int = 0,
-        np_random: RandomState = None) -> Line:
-        pass
-
-    def __call__(self, *args, **kwargs):
-        return self.generate(*args, **kwargs)
     
 if __name__ == "__main__":
     print('starting main')
     print(f'avail gpus: {[torch.cuda.device(i) for i in range(torch.cuda.device_count())]}')
     args = parse_args()
-
+    
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    
+    device = 'cuda'
     run_name = (
         f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     )
@@ -632,7 +625,7 @@ if __name__ == "__main__":
     actor_net = actor_net()
     actor_module = TensorDictModule(
         actor_net,
-        in_keys=[('hidden', 'embedding'), ('hidden', 'att_embedding')],
+        in_keys=[('hidden', 'embedding'), ('hidden', 'att_embedding'), ('agents', 'observation', 'valid_actions')],
         out_keys=[('agents', 'logits')]
     )
     
@@ -642,7 +635,9 @@ if __name__ == "__main__":
         out_keys = [('agents', 'action')],
         distribution_class = torch.distributions.categorical.Categorical,
         return_log_prob=True,
-        log_prob_key=('agents', 'sample_log_prob')
+        log_prob_key=('agents', 'sample_log_prob'),
+        cache_dist=True,
+        default_interaction_type=InteractionType.RANDOM
     )
 
     from torchrl.modules import ValueOperator
@@ -670,13 +665,15 @@ if __name__ == "__main__":
     ).to('cuda')
     
     print(f'device of critic module: {critic_module.device}')
-    optimizer = optim.Adam(
-        model.parameters(), lr=args.learning_rate, eps=1e-5, weight_decay = 1e-5
-    )
     
-    print('optim done')
-    #test_rollout = env.rollout(max_steps= 100, policy = model.get_policy_operator())
-    #print('rollout successful')
+    if args.use_pretrained_network:
+        model_path = args.pretrained_network_path
+        assert (model_path.endswith('tar')), 'Network format not known.'
+        checkpoint = torch.load(model_path)
+        print(f'type of state dict: {type(checkpoint["model_state_dict"])}')
+        #print([key for key, _ in checkpoint['model_state_dict']])
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print('loaded pretrained model from .tar file') 
     
     collector = SyncDataCollector(
         env,
@@ -697,29 +694,37 @@ if __name__ == "__main__":
     )
     print('replay buffer done')
     loss_module = ClipPPOLoss(
-        actor=model.get_policy_operator(),
-        critic=model.get_value_operator(),
+        actor=ProbabilisticTensorDictSequential(common_module, policy),
+        critic=critic_module,
         critic_coef=args.vf_coef,
         clip_epsilon=args.clip_coef,
         entropy_coef=args.ent_coef,
-        normalize_advantage=False,  # Important to avoid normalizing across the agent dimension
+        normalize_advantage=args.norm_adv,  # Important to avoid normalizing across the agent dimension
+        loss_critic_type = "smooth_l1",
+        
     )
     
     print(f'env action key: {env.action_key}')
     print(f'env reward key: {env.reward_key}')
     loss_module.set_keys(  # We have to tell the loss where to find the keys
-        reward=env.reward_key,
+        #reward=env.reward_key,
         action=env.action_key,
         sample_log_prob=("agents", "sample_log_prob"),
         value=("state_value"),
         # These last 2 keys will be expanded to match the reward shape
         done=("agents", "done"),
         terminated=("agents", "terminated"),
+        advantage=("agents", "advantage")
     )
-
+    """     loss_module.make_value_estimator(
+    ValueEstimators.GAE, gamma=0.99, lmbda=0.95
+    )  # We build GAE
+    GAE = loss_module.value_estimator """
+    
     optim = torch.optim.Adam(loss_module.parameters(), lr=2.5e-4, weight_decay=1e-5)
     
     pbar = tqdm(total=n_iters, desc="episode_reward_mean = 0")
+    print(f'envs: {env}')
 
     episode_reward_mean_list = []
     global_step = 0
@@ -731,7 +736,9 @@ if __name__ == "__main__":
         print(f'duration rollout: {time.time()-start_time}')
         global_step += args.batch_size
         print(f'global step: {global_step}')
-        print(f'device of tensordict data: {tensordict_data.device}')
+        #print(f'td rewards: {tensordict_data[("next", "agents", "reward")]}')
+        #print(f'actions chosen: {tensordict_data[("agents", "action")]}')
+        #print(f'device of tensordict data: {tensordict_data.device}')
         #print(f'example of tensordict data: {tensordict_data}')
         # log data about collector:
         if args.track:
@@ -745,41 +752,62 @@ if __name__ == "__main__":
                 'rewards/max', tensordict_data[('next', 'agents', 'reward')].max(), global_step
             )
             #print("valid action probs: {}".format(rollout_data['valid_actions_probs'].shape))
-            writer.add_scalar("action_probs/do_nothing", tensordict_data[('agents', 'logits')][:,:,:,0].mean(), global_step)
-            writer.add_scalar("action_probs/left", tensordict_data[('agents', 'logits')][:,:,:,1].mean(), global_step)
-            writer.add_scalar("action_probs/forward", tensordict_data[('agents', 'logits')][:,:,:,2].mean(), global_step)
-            writer.add_scalar("action_probs/right", tensordict_data[('agents', 'logits')][:,:,:,3].mean(), global_step)
-            writer.add_scalar("action_probs/stop_moving", tensordict_data[('agents', 'logits')][:,:,:,4].mean(), global_step)
+            mean_logits = torch.sigmoid(tensordict_data[('agents', 'logits')]).mean((0, 1,2))
+            #print(f'mean log: {mean_logits}')
+            softmax_value = mean_logits
+            print(f'softmax vals: {softmax_value}')
+            writer.add_scalar("action_probs/do_nothing", softmax_value[0], global_step)
+            writer.add_scalar("action_probs/left", softmax_value[1], global_step)
+            writer.add_scalar("action_probs/forward", softmax_value[2], global_step)
+            writer.add_scalar("action_probs/right",softmax_value[3], global_step)
+            writer.add_scalar("action_probs/stop_moving", softmax_value[4], global_step)
             writer.add_scalar("charts/rollout_steps_per_second", args.batch_size/rollout_duration, global_step)
+            
+            final_steps = tensordict_data[("next", "done")].squeeze()
             writer.add_scalar("charts/total_rollout_duration", rollout_duration, global_step)
-            
-            
-        
-        tensordict_data = tensordict_data.to(device)
+            writer.add_scalar("stats/arrival_ratio", tensordict_data[("stats", "arrival_ratio")][torch.roll(final_steps, 1, -1)].mean(), global_step)
+            writer.add_scalar("stats/deadlock_ratio", tensordict_data[("stats", "deadlock_ratio")][torch.roll(final_steps, 1, -1)].mean(), global_step)
+                    
+        tensordict_data = tensordict_data.to('cuda')
         tensordict_data.set(
             ("next", "agents", "reward"),
             tensordict_data.get(("next", "agents", "reward")).mean(-1))
-        
-        with torch.no_grad():
 
-            lastgaelam = torch.zeros(args.num_envs).to(device)
+        #do we have n issue with averaging averages?
+        #print(f'averaged rewards: {tensordict_data[("next", "agents", "reward")]}')
+        
+        #are we averaging the rewards over all agents here? what's happening?
+        with torch.no_grad():
+            #tensordict_data = tensordict_data.flatten()
+            """ GAE(
+                tensordict_data,
+                params=loss_module.critic_params,
+                target_params=loss_module.target_critic_params,
+            ) """
+            lastgaelam = torch.zeros(args.num_envs).to('cuda')
             rollout_lengths = int(args.batch_size/args.num_envs)
             tensordict_data['advantage'] = torch.zeros_like(tensordict_data['state_value']).to('cuda')
-            #print('shape of advantages: {}'.format(advantages.shape))
-            #print('rollout data values shape: {}'.format(rollout_data['values'].shape))
+            
+            #we get the value of the last rollout observation
+            next_val = model.get_value_operator()(tensordict_data[('next')][:,rollout_lengths-1])
+            #print(f'next vals: {next_val}')
+            
             for t in reversed(range(rollout_lengths)):
-                if t == rollout_lengths - 1:
+                if t == rollout_lengths-1: # for the last one, we get the special values for the last observation
                     nextnonterminal = ~tensordict_data[('next', 'done')][:,t].squeeze()
-                    nextvalues = tensordict_data[('state_value')][:,t].squeeze()
+                    #print(f'shape nextonterminal: {nextnonterminal.shape}')
+                    nextvalues = next_val['state_value'].squeeze()
                 else:
+                    # for all other rollouts, we get the dones from the current t, and the values from the next t
                     nextnonterminal = ~tensordict_data[('next', 'done')][:,t].squeeze()
-                    nextvalues = tensordict_data[('state_value')][:,t].squeeze()
+                    #print(f'next nonterminal: {nextnonterminal}')
+                    nextvalues = tensordict_data[('state_value')][:,t + 1].squeeze()
+                #print(f'nextvalue: {nextvalues}')
                 delta = (
                     tensordict_data[('next', 'agents', 'reward')][:, t]
                     + args.gamma * nextvalues * nextnonterminal
                     - tensordict_data[('state_value')][:, t]
                 )
-
 
                 tensordict_data['advantage'][:,t] = lastgaelam = (
                     delta
@@ -787,33 +815,40 @@ if __name__ == "__main__":
                     * args.gae_lambda
                     * nextnonterminal
                     * lastgaelam
-                ).flatten()
+                ).flatten() #why do we do flatten here?
 
-            tensordict_data['returns'] = tensordict_data['advantage'] + tensordict_data["state_value"]
-        tensordict_data['value_target'] = tensordict_data['state_value']
+            tensordict_data['value_target'] = tensordict_data['advantage'] + tensordict_data["state_value"]
         
+        tensordict_data[("agents", "advantage")] = tensordict_data["advantage"].repeat_interleave(args.num_agents).reshape(tensordict_data[("agents", "action")].shape).unsqueeze(-1)
+        
+        #print(f'advantage: {tensordict_data["advantage"]}')
+        #print(f'value_target: {tensordict_data["value_target"]}')
+        #print(f'state value: {tensordict_data["state_value"]}')
+
         if args.track:
             writer.add_scalar("internal_values/advantages_max", tensordict_data['advantage'].max(), global_step)
             writer.add_scalar("internal_values/advantages_min", tensordict_data['advantage'].min(), global_step)
         
         data_view = tensordict_data.reshape(-1)
-        print(f'shape of data view: {data_view.shape}')# Flatten the batch size to shuffle data
+        #print(f'shape of data view: {data_view.shape}')# Flatten the batch size to shuffle data
         replay_buffer.extend(data_view)
-        print(f'device of model: {model.device}')
+        #print(f'device of model: {model.device}')
         for n_epoch in range(args.update_epochs):
             print(f'epoch nr: {n_epoch}')
             for _ in range(args.num_minibatches):
                 subdata = replay_buffer.sample()
+                
                 #print(f'shape of subdata {subdata.shape}')
                 #print(f'example of subdata: {subdata}')
                 loss_vals = loss_module(subdata)
-
+                
+                #print(f'loss vals: {loss_vals}')
                 loss_value = (
                     loss_vals["loss_objective"]
                     + loss_vals["loss_critic"]
                     + loss_vals["loss_entropy"]
                 )
-   
+                
                 loss_value.backward()
 
                 torch.nn.utils.clip_grad_norm_(
@@ -821,12 +856,15 @@ if __name__ == "__main__":
                 )  # Optional
 
                 optim.step()
+                
+                #for param in policy.parameters():
+                    #print(f'param grad in policy: {param.grad}')
                 optim.zero_grad()
         print(f'last loss is: {loss_value}')
         training_duration =  time.time() - training_start
         if args.track:
             writer.add_scalar(
-                "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
+                "charts/learning_rate", optim.param_groups[0]["lr"], global_step
             )
             writer.add_scalar("losses/value_loss", loss_vals["loss_critic"], global_step)
             writer.add_scalar("losses/policy_loss", loss_vals["loss_objective"], global_step)
@@ -838,11 +876,21 @@ if __name__ == "__main__":
             writer.add_scalar("charts/training_speed", args.batch_size*args.update_epochs / training_duration, global_step)
             writer.add_scalar("charts/total_training_duration", training_duration, global_step)
             
+            
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optim.state_dict(),
+            }, f"model_checkpoints/{run_name}.tar")
+            
         
-                
-        collector.update_policy_weights_()
-
-        
+        #for param in model.parameters():
+            #print(param.data)        
+        collector.update_policy_weights_()        
         start_rollout = time.time()
+        
+        
+        args.arrival_reward_coef = args.arrival_reward_coef * 0.5
+        print(f'arrival reward coef after reassignmet: {args.arrival_reward_coef}')
+        exit()
         # Logging
  

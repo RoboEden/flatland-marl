@@ -114,11 +114,13 @@ def parse_args():
     parser.add_argument('--use-start-reward', action=argparse.BooleanOptionalAction)
     parser.add_argument('--use-delay-reward', action=argparse.BooleanOptionalAction)
     parser.add_argument('--initialize-action-weights', action=argparse.BooleanOptionalAction)
-    parser.add_argument('--max-episode-steps', type=int, default=80)
+    parser.add_argument('--max-episode-steps', type=int, default=None)
     parser.add_argument('--force-shortest-path', action=argparse.BooleanOptionalAction)
     parser.add_argument("--arrival-reward", type=int, default=1, 
         help="The reward to be returned when the train departs.")
     parser.add_argument('--stepwise', action=argparse.BooleanOptionalAction)
+    parser.add_argument('--map-width', type=int, default=30)
+    parser.add_argument('--map-height', type=int, default=35)
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -163,17 +165,16 @@ class RailEnvTd(RailEnv):
         ''' Extend default flatland reset by returning a tensordict. '''
         # get observation
         #print("reset env")
-        observations, _ = super().reset(random_seed=random_seed)
-        
-        try: 
-            if args.max_episode_steps is not None:
-                for agent_i, agent in enumerate(self.agents):
-                    agent.earliest_departure = 0
-                    agent.latest_arrival = args.max_episode_steps
-                
-                self._max_episode_steps = args.max_episode_steps
-        except:
-            print('using default max episode steps')
+        observations, _ = super().reset(random_seed = 1)
+
+        if args.max_episode_steps is not None:
+            for agent_i, agent in enumerate(self.agents):
+                agent.earliest_departure = 0
+                agent.latest_arrival = args.max_episode_steps
+            
+            self._max_episode_steps = args.max_episode_steps
+        else:
+            print('Using default schedule.')
         
         if tensordict is None:
             tensordict_out = TensorDict({}, batch_size=[])
@@ -516,8 +517,8 @@ if __name__ == "__main__":
         def create_random_env():
             return RailEnvTd(
                 number_of_agents=args.num_agents,
-                width=30,
-                height=35,
+                width=args.map_width,
+                height=args.map_height,
                 rail_generator=SparseRailGen(
                     max_num_cities=3,
                     grid_mode=False,
@@ -742,7 +743,7 @@ if __name__ == "__main__":
         
         rollout_duration = time.time()-rollout_start
         print(f'duration rollout: {rollout_duration}')
-        
+        print(f'rollout data rewards: {rollout_data["rewards"]}')
         if args.track:
             writer.add_scalar(
                 "rewards/min", rollout_data["rewards"].min(), global_step
@@ -803,7 +804,7 @@ if __name__ == "__main__":
         
         rollout_data['rewards_mean']=rollout_data['rewards'].mean(-1)
         #print('shape of rewards after mean: {}'.format(rollout_data['rewards_mean'].shape))
-        
+        print(f'rewards after mean: {rollout_data["rewards_mean"]}')
         # Calculate advantages
         with torch.no_grad():
             next_value = td_module(next_obs.unsqueeze(0))["values"]
@@ -842,8 +843,11 @@ if __name__ == "__main__":
             writer.add_scalar("internal_values/values", rollout_data['values'].mean(), global_step)
         #print(rollout_data['rewards_mean'].shape)
         print(f'advantages: {advantages}')
+        print(f'returns : {returns}')
+        print(f'values : {rollout_data["values"]}')
         #print(rollout_data['done'].shape)
         #print(rollout_data['values'].shape)
+
         #print("rollout data: {}".format(torch.cat((advantages, returns, rollout_data['actions'], rollout_data['rewards_mean'], rollout_data['done'].unsqueeze(-1), rollout_data['values']), dim=0)))
         # Optimizing the policy and value network
         b_inds = np.arange(args.num_steps)
@@ -867,6 +871,7 @@ if __name__ == "__main__":
                     updated_rollout_data["logprobs"]
                     - rollout_data["logprobs"][mb_inds]
                 )
+                print(f'logratios: {logratio}')
                 #print("shape of logratio: {}".format(logratio.shape))
                 ratio = logratio.exp() # not changing at the moment, that makes senses
                 #print("prob ration in training: {}".format(ratio))
@@ -895,19 +900,24 @@ if __name__ == "__main__":
                 #print(ratio.cpu().squeeze(-1).numpy().shape)
                 #print(rollout_data[mb_inds]['actions'].cpu().squeeze(-1).numpy().shape)
                 #print("cat advangates: {}".format(torch.cat((mb_advantages, ratio, rollout_data[mb_inds]['actions']), dim=1)))
-                #print('mb advantages shape: {}'.format(mb_advantages.shape))
+                print('mb advantages shape: {}'.format(mb_advantages.shape))
 
                 mb_advantages = mb_advantages.repeat_interleave(args.num_agents).reshape(ratio.shape)
+                print(f'mb advantages shape after reshape: {mb_advantages.shape}')
                 #print('ratio shape: {}'.format(ratio.shape))
+                print(f'ratios: {ratio}')
                 pg_loss1 = -mb_advantages * ratio
                 #print('ratio: {}'.format(ratio))
-                #print('pg loss 1: {}'.format(pg_loss1))
+                print('pg loss 1: {}'.format(pg_loss1))
                 pg_loss2 = -mb_advantages * torch.clamp(
                     ratio, 1 - args.clip_coef, 1 + args.clip_coef
                 )
-                #print('pg loss 2: {}'.format(pg_loss2))
+                print('pg loss 2: {}'.format(pg_loss2))
+                print(f'max pg loss: { torch.max(pg_loss1, pg_loss2)}')
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-                #print('pg loss: {}'.format(pg_loss))
+                
+                print('pg loss: {}'.format(pg_loss))
+
                 # Value loss
                 newvalue = updated_rollout_data["values"]
                 if args.clip_vloss:
@@ -1003,7 +1013,7 @@ if __name__ == "__main__":
                 'optimizer_state_dict': optimizer.state_dict(),
             }, f"model_checkpoints/{run_name}.tar")
         print(f'duration update: {time.time()-start_time}')
-        
+        exit()
     if args.track:
         torch.save(td_module.state_dict(), f"trained_models/{run_name}.pt")
         writer.close()
