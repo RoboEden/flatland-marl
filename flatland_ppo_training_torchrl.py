@@ -71,6 +71,8 @@ from tqdm import tqdm
 
 from time import sleep
 
+import json
+
 
 import time
 
@@ -144,7 +146,9 @@ def parse_args():
     parser.add_argument("--do-render", action='store_true')
     parser.add_argument('--use-arrival-reward', action='store_true')
     parser.add_argument('--freeze-embeddings', action=argparse.BooleanOptionalAction)
-    parser.add_argument("--env-reward-coef", type=float, default=1,
+    parser.add_argument("--delay-reward-coef", type=float, default=1,
+        help="Toggles whether to use the default flatland env reward at each step")
+    parser.add_argument("--shortest-path-reward-coef", type=float, default=0,
         help="Toggles whether to use the default flatland env reward at each step")
     parser.add_argument('--departure-reward-coef', type=float, default=0)
     parser.add_argument('--arrival-reward-coef', type=float, default=5)
@@ -157,6 +161,7 @@ def parse_args():
     parser.add_argument('--stepwise', action=argparse.BooleanOptionalAction)
     parser.add_argument('--map-width', type=int, default=30)
     parser.add_argument('--map-height', type=int, default=35)
+    parser.add_argument('--curriculum-path', type=str, default=None)
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -174,6 +179,15 @@ class RailEnvTd(RailEnv):
         - step: Extend the default flatland step by accepting and returning a tensordict
         - update_step_reward: Override default flatland update_step_reward, allowing for custom reward functions upon step completion
     '''
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.delay_reward_coef = 0
+        self.shortest_path_reward_coef = 0
+        self.arrival_reward_coef = 0
+        self.deadlock_penalty_coef = 0
+        self.departure_reward_coef = 0
+        self.previous_deadlocked = None
     
     def obs_to_td(self, obs_list):
         ''' Return the observation as a tensordict.'''
@@ -204,6 +218,7 @@ class RailEnvTd(RailEnv):
         # get observation
         #print("entering reset env")
         observations, _ = super().reset(random_seed=random_seed)
+        print(f'max episode steps: {self._max_episode_steps}')
 
         # use default for the moment, give enough time to train
         """ if args.max_episode_steps is not None:
@@ -213,7 +228,6 @@ class RailEnvTd(RailEnv):
             
             self._max_episode_steps = args.max_episode_steps """
 
-        
         if tensordict is None:
             tensordict_out = TensorDict({}, batch_size=[])
             tensordict_out['agents'] = TensorDict({}, batch_size = [])
@@ -227,6 +241,7 @@ class RailEnvTd(RailEnv):
         tensordict_out["agents"]["observation"]["valid_actions"] = torch.tensor(
             valid_actions, dtype=torch.bool
         ) 
+        self.previous_deadlocked = self.motionCheck.svDeadlocked
         return tensordict_out
 
     def step(self, tensordict):
@@ -256,60 +271,55 @@ class RailEnvTd(RailEnv):
             valid_actions, dtype=torch.bool
         )
         n_arrival = 0
-        for a in self.agents:
-            if a.position is None and a.state != TrainState.READY_TO_DEPART:
+        for agent in self.agents:
+            if agent.state == TrainState.DONE:
                 n_arrival += 1
         return_td[("stats", "arrival_ratio")] = torch.tensor(n_arrival/self.number_of_agents, dtype = torch.float32)
-        n_deadlocked_agents = len(self.motionCheck.find_swaps())
+        self.previous_deadlocked = self.motionCheck.svDeadlocked
+        n_deadlocked_agents = len(self.previous_deadlocked)
         return_td[("stats", "deadlock_ratio")] = torch.tensor(n_deadlocked_agents/self.number_of_agents, dtype = torch.float32)
-        print(f'rewards: {return_td[("agents", "reward")]}')
+        #print(f'rewards: {return_td[("agents", "reward")]}')
+        
         return return_td
 
     def update_step_rewards(self, i_agent):
         agent = self.agents[i_agent]
-        env_reward = arrival_reward = n_deadlocks = departure_reward = 0
-        if args.env_reward_coef != 0:
-            env_reward = None
-            # agent done? (arrival_time is not None)
-            if agent.state == TrainState.DONE:
-                # if agent arrived earlier or on time = 0
-                # if agent arrived later = -ve reward based on how late
-                env_reward = min(agent.latest_arrival - agent.arrival_time, 0)
-
-            # Agents not done (arrival_time is None)
-            else:
-                # CANCELLED check (never departed)
-                if agent.state.is_off_map_state():
-                    env_reward = (
-                        -1
-                        * self.cancellation_factor
-                        * (
-                            agent.get_travel_time_on_shortest_path(
-                                self.distance_map
-                            )
-                            + self.cancellation_time_buffer
-                        )
-                    )
-
-                # Departed but never reached
-                if agent.state.is_on_map_state():
-                    env_reward = agent.get_current_delay(self._elapsed_steps, self.distance_map)
+        delay_reward = shortest_path_reward = arrival_reward = deadlock_penalty = departure_reward = 0
+        if self.delay_reward_coef != 0:        
+            # we start giving the model rewards as soon as the agent can actually choose actions
+            if (agent.earliest_departure <= self._elapsed_steps) and agent.state != TrainState.DONE:
+                delay_reward = min(agent.get_current_delay(self._elapsed_steps, self.distance_map), 0) # only give reward if delayed
         
-        if args.arrival_reward != 0:
-            if agent.position is None and agent.state != TrainState.READY_TO_DEPART and agent.state_machine.previous_state != TrainState.DONE: 
+        if self.shortest_path_reward_coef != 0:
+            if (agent.earliest_departure <= self._elapsed_steps) and agent.state != TrainState.DONE:
+                shortest_path_reward = agent.get_current_delay(self._elapsed_steps, self.distance_map)
+        
+        if self.arrival_reward_coef != 0:
+            if agent.state == TrainState.DONE and agent.state_machine.previous_state != TrainState.DONE: 
                 # only give arrival reward once
                 arrival_reward = 1
-        
-        if args.deadlock_penalty_coef != 0:
-            n_deadlocks = len(self.motionCheck.find_swaps()) 
-            
-        if args.departure_reward_coef != 0:
-            if (agent.state.is_on_map_state() and agent.state_machine.previous_state.is_off_map_state()):
-                departure_reward = 1
-        print(args.arrival_reward_coef)
-            
-        self.rewards_dict[i_agent] += args.env_reward_coef*env_reward + args.arrival_reward_coef*arrival_reward + args.deadlock_penalty_coef*n_deadlocks + args.departure_reward_coef*departure_reward
 
+        if self.deadlock_penalty_coef != 0:
+            if (agent.position in self.motionCheck.svDeadlocked) and (agent.position not in self.previous_deadlocked):
+                deadlock_penalty = 1
+            
+        if self.departure_reward_coef != 0:
+            if (agent.state.is_on_map_state() and agent.state_machine.previous_state.is_off_map_state()):
+                departure_reward = 1            
+        self.rewards_dict[i_agent] += (self.delay_reward_coef*delay_reward + 
+                                       self.shortest_path_reward_coef*shortest_path_reward + 
+                                       self.arrival_reward_coef*arrival_reward + 
+                                       self.deadlock_penalty_coef*deadlock_penalty + 
+                                       self.departure_reward_coef*departure_reward)
+    
+    def set_reward_coef(self, delay_reward_coef, shortest_path_reward_coef, arrival_reward_coef, deadlock_penalty_coef, departure_reward_coef):
+        self.delay_reward_coef = delay_reward_coef
+        self.shortest_path_reward_coef = shortest_path_reward_coef
+        self.arrival_reward_coef = arrival_reward_coef
+        self.deadlock_penalty_coef = deadlock_penalty_coef
+        self.departure_reward_coef = departure_reward_coef
+        
+    
     def _handle_end_reward(self, agent: EnvAgent) -> int:
         if True:
             #print("end of episode status: {}".format(agent.state))
@@ -418,28 +428,6 @@ class td_torch_rail(EnvBase):
         #self.env_renderer.render_env(show=True, show_observations=False, show_predictions=False)
         return self.env.step(tensordict)
     
-def make_env():
-    td_env = RailEnvTd(
-        number_of_agents=args.num_agents,
-        width = args.map_width,
-        height = args.map_height,
-        rail_generator=SparseRailGen(
-            max_num_cities=3,
-            grid_mode=False,
-            max_rails_between_cities=2,
-            max_rail_pairs_in_city=2,
-        ),
-        line_generator=SparseLineGen(
-            speed_ratio_map={1.0: 1}
-        ),
-        malfunction_generator=ParamMalfunctionGen(
-            MalfunctionParameters(
-                malfunction_rate=1 / 4500, min_duration=20, max_duration=50)
-        ),
-        obs_builder_object=TreeCutils(31, 500),
-    )
-    td_env.reset()
-    return td_torch_rail(td_env)
 
 transitions = RailEnvTransitions()
 cells = transitions.transition_list
@@ -612,9 +600,6 @@ if __name__ == "__main__":
     )
     print("device used: {}".format(device))
     
-    env = ParallelEnv(args.num_envs, make_env)
-    print('set up envs')
-
     embedding_net = embedding_net()
     common_module = TensorDictModule(
         embedding_net,
@@ -670,29 +655,12 @@ if __name__ == "__main__":
         model_path = args.pretrained_network_path
         assert (model_path.endswith('tar')), 'Network format not known.'
         checkpoint = torch.load(model_path)
-        print(f'type of state dict: {type(checkpoint["model_state_dict"])}')
-        #print([key for key, _ in checkpoint['model_state_dict']])
         model.load_state_dict(checkpoint['model_state_dict'])
         print('loaded pretrained model from .tar file') 
-    
-    collector = SyncDataCollector(
-        env,
-        model,
-        device='cpu',
-        storing_device='cpu',
-        frames_per_batch=args.batch_size,
-        total_frames=args.total_timesteps,
-    )
+
     print('collector done')
     from torchrl.data import TensorDictReplayBuffer
-    replay_buffer = TensorDictReplayBuffer(
-        storage=LazyTensorStorage(
-            args.batch_size, device=device
-        ),  # We store the frames_per_batch collected at each iteration
-        sampler=SamplerWithoutReplacement(),
-        batch_size=args.minibatch_size,  # We will sample minibatches of this size
-    )
-    print('replay buffer done')
+
     loss_module = ClipPPOLoss(
         actor=ProbabilisticTensorDictSequential(common_module, policy),
         critic=critic_module,
@@ -701,14 +669,11 @@ if __name__ == "__main__":
         entropy_coef=args.ent_coef,
         normalize_advantage=args.norm_adv,  # Important to avoid normalizing across the agent dimension
         loss_critic_type = "smooth_l1",
-        
     )
-    
-    print(f'env action key: {env.action_key}')
-    print(f'env reward key: {env.reward_key}')
+
     loss_module.set_keys(  # We have to tell the loss where to find the keys
         #reward=env.reward_key,
-        action=env.action_key,
+        action=("agents", "action"),
         sample_log_prob=("agents", "sample_log_prob"),
         value=("state_value"),
         # These last 2 keys will be expanded to match the reward shape
@@ -724,173 +689,256 @@ if __name__ == "__main__":
     optim = torch.optim.Adam(loss_module.parameters(), lr=2.5e-4, weight_decay=1e-5)
     
     pbar = tqdm(total=n_iters, desc="episode_reward_mean = 0")
-    print(f'envs: {env}')
 
-    episode_reward_mean_list = []
     global_step = 0
+
+    print(f'map height: {args.map_height}')
+    from tensordict import LazyStackedTensorDict
+    if args.curriculum_path is not None:
+        curriculums = open(args.curriculum_path)
+        curriculums = json.load(curriculums)
+        print(curriculums)
+    else: 
+        curriculums =[
+            {"map_height": args.map_height,
+             "map_width": args.map_width,
+             "num_agents" : args.num_agents,
+             "arrival_reward_coef": args.arrival_reward_coef,
+             "delay_reward_coef": args.delay_reward_coef,
+             "shortest_path_reward_coef": args.shortest_path_reward_coef,
+             "departure_reward_coef": args.departure_reward_coef,
+             "deadlock_penalty_coef": args.deadlock_penalty_coef,
+             "total_timesteps": args.total_timesteps,
+             },
+        ]
+        
+    curriculum = curriculums[0]
+    
+    print(f'curriculum: {curriculum}')
     start_time = time.time()
-    start_rollout = time.time()
-    for tensordict_data in collector:
-        rollout_duration = time.time() - start_rollout
-        training_start = time.time()
-        print(f'duration rollout: {time.time()-start_time}')
-        global_step += args.batch_size
-        print(f'global step: {global_step}')
-        #print(f'td rewards: {tensordict_data[("next", "agents", "reward")]}')
-        #print(f'actions chosen: {tensordict_data[("agents", "action")]}')
-        #print(f'device of tensordict data: {tensordict_data.device}')
-        #print(f'example of tensordict data: {tensordict_data}')
-        # log data about collector:
-        if args.track:
-            writer.add_scalar(
-                "rewards/min", tensordict_data[('next', 'agents', 'reward')].min(), global_step
+    
+    for curriculum in curriculums:
+        def make_env():
+            td_env = RailEnvTd(
+                number_of_agents= curriculum["num_agents"],
+                width = curriculum["map_width"],
+                height = curriculum["map_height"],
+                rail_generator=SparseRailGen(
+                    max_num_cities=3,
+                    grid_mode=False,
+                    max_rails_between_cities=2,
+                    max_rail_pairs_in_city=2,
+                ),
+                line_generator=SparseLineGen(
+                    speed_ratio_map={1.0: 1}
+                ),
+                malfunction_generator=ParamMalfunctionGen(
+                    MalfunctionParameters(
+                        malfunction_rate=1 / 4500, min_duration=20, max_duration=50)
+                ),
+                obs_builder_object=TreeCutils(31, 500),
             )
-            writer.add_scalar(
-                "rewards/mean", tensordict_data[('next', 'agents', 'reward')].mean(), global_step
-            )
-            writer.add_scalar(
-                'rewards/max', tensordict_data[('next', 'agents', 'reward')].max(), global_step
-            )
-            #print("valid action probs: {}".format(rollout_data['valid_actions_probs'].shape))
-            mean_logits = torch.sigmoid(tensordict_data[('agents', 'logits')]).mean((0, 1,2))
-            #print(f'mean log: {mean_logits}')
-            softmax_value = mean_logits
-            print(f'softmax vals: {softmax_value}')
-            writer.add_scalar("action_probs/do_nothing", softmax_value[0], global_step)
-            writer.add_scalar("action_probs/left", softmax_value[1], global_step)
-            writer.add_scalar("action_probs/forward", softmax_value[2], global_step)
-            writer.add_scalar("action_probs/right",softmax_value[3], global_step)
-            writer.add_scalar("action_probs/stop_moving", softmax_value[4], global_step)
-            writer.add_scalar("charts/rollout_steps_per_second", args.batch_size/rollout_duration, global_step)
             
-            final_steps = tensordict_data[("next", "done")].squeeze()
-            writer.add_scalar("charts/total_rollout_duration", rollout_duration, global_step)
-            writer.add_scalar("stats/arrival_ratio", tensordict_data[("stats", "arrival_ratio")][torch.roll(final_steps, 1, -1)].mean(), global_step)
-            writer.add_scalar("stats/deadlock_ratio", tensordict_data[("stats", "deadlock_ratio")][torch.roll(final_steps, 1, -1)].mean(), global_step)
-                    
-        tensordict_data = tensordict_data.to('cuda')
-        tensordict_data.set(
-            ("next", "agents", "reward"),
-            tensordict_data.get(("next", "agents", "reward")).mean(-1))
-
-        #do we have n issue with averaging averages?
-        #print(f'averaged rewards: {tensordict_data[("next", "agents", "reward")]}')
+            td_env.set_reward_coef(shortest_path_reward_coef=curriculum["shortest_path_reward_coef"], 
+                                   delay_reward_coef=curriculum["delay_reward_coef"],
+                                   arrival_reward_coef=curriculum["arrival_reward_coef"], 
+                                   deadlock_penalty_coef=curriculum["deadlock_penalty_coef"], 
+                                   departure_reward_coef=curriculum["departure_reward_coef"])
+            td_env.reset()
+            return td_torch_rail(td_env)
         
-        #are we averaging the rewards over all agents here? what's happening?
-        with torch.no_grad():
-            #tensordict_data = tensordict_data.flatten()
-            """ GAE(
-                tensordict_data,
-                params=loss_module.critic_params,
-                target_params=loss_module.target_critic_params,
-            ) """
-            lastgaelam = torch.zeros(args.num_envs).to('cuda')
-            rollout_lengths = int(args.batch_size/args.num_envs)
-            tensordict_data['advantage'] = torch.zeros_like(tensordict_data['state_value']).to('cuda')
-            
-            #we get the value of the last rollout observation
-            next_val = model.get_value_operator()(tensordict_data[('next')][:,rollout_lengths-1])
-            #print(f'next vals: {next_val}')
-            
-            for t in reversed(range(rollout_lengths)):
-                if t == rollout_lengths-1: # for the last one, we get the special values for the last observation
-                    nextnonterminal = ~tensordict_data[('next', 'done')][:,t].squeeze()
-                    #print(f'shape nextonterminal: {nextnonterminal.shape}')
-                    nextvalues = next_val['state_value'].squeeze()
-                else:
-                    # for all other rollouts, we get the dones from the current t, and the values from the next t
-                    nextnonterminal = ~tensordict_data[('next', 'done')][:,t].squeeze()
-                    #print(f'next nonterminal: {nextnonterminal}')
-                    nextvalues = tensordict_data[('state_value')][:,t + 1].squeeze()
-                #print(f'nextvalue: {nextvalues}')
-                delta = (
-                    tensordict_data[('next', 'agents', 'reward')][:, t]
-                    + args.gamma * nextvalues * nextnonterminal
-                    - tensordict_data[('state_value')][:, t]
+        env = ParallelEnv(args.num_envs, make_env)
+        
+        collector = SyncDataCollector(
+            env,
+            model,
+            device='cpu',
+            storing_device='cpu',
+            frames_per_batch=args.batch_size,
+            total_frames=curriculum["total_timesteps"],
+        )
+        
+        replay_buffer = TensorDictReplayBuffer(
+            storage=LazyTensorStorage(
+                args.batch_size, device=device
+            ),  # We store the frames_per_batch collected at each iteration
+            sampler=SamplerWithoutReplacement(),
+            batch_size=args.minibatch_size,  # We will sample minibatches of this size
+        )
+
+        start_rollout = time.time()
+        for tensordict_data in collector:
+            rollout_duration = time.time() - start_rollout
+            training_start = time.time()
+            print(f'duration rollout: {time.time()-start_time}')
+            global_step += args.batch_size
+            print(f'global step: {global_step}')
+            #print(f'td rewards: {tensordict_data[("next", "agents", "reward")]}')
+            #print(f'actions chosen: {tensordict_data[("agents", "action")]}')
+            #print(f'device of tensordict data: {tensordict_data.device}')
+            #print(f'example of tensordict data: {tensordict_data}')
+            # log data about collector:
+            if args.track:
+                writer.add_scalar(
+                    "rewards/min", tensordict_data[('next', 'agents', 'reward')].min(), global_step
                 )
-
-                tensordict_data['advantage'][:,t] = lastgaelam = (
-                    delta
-                    + args.gamma
-                    * args.gae_lambda
-                    * nextnonterminal
-                    * lastgaelam
-                ).flatten() #why do we do flatten here?
-
-            tensordict_data['value_target'] = tensordict_data['advantage'] + tensordict_data["state_value"]
-        
-        tensordict_data[("agents", "advantage")] = tensordict_data["advantage"].repeat_interleave(args.num_agents).reshape(tensordict_data[("agents", "action")].shape).unsqueeze(-1)
-        
-        #print(f'advantage: {tensordict_data["advantage"]}')
-        #print(f'value_target: {tensordict_data["value_target"]}')
-        #print(f'state value: {tensordict_data["state_value"]}')
-
-        if args.track:
-            writer.add_scalar("internal_values/advantages_max", tensordict_data['advantage'].max(), global_step)
-            writer.add_scalar("internal_values/advantages_min", tensordict_data['advantage'].min(), global_step)
-        
-        data_view = tensordict_data.reshape(-1)
-        #print(f'shape of data view: {data_view.shape}')# Flatten the batch size to shuffle data
-        replay_buffer.extend(data_view)
-        #print(f'device of model: {model.device}')
-        for n_epoch in range(args.update_epochs):
-            print(f'epoch nr: {n_epoch}')
-            for _ in range(args.num_minibatches):
-                subdata = replay_buffer.sample()
+                writer.add_scalar(
+                    "rewards/mean", tensordict_data[('next', 'agents', 'reward')].mean(), global_step
+                )
+                writer.add_scalar(
+                    'rewards/max', tensordict_data[('next', 'agents', 'reward')].max(), global_step
+                )
+                #print("valid action probs: {}".format(rollout_data['valid_actions_probs'].shape))
+                mean_logits = torch.sigmoid(tensordict_data[('agents', 'logits')]).mean((0, 1,2))
+                #print(f'mean log: {mean_logits}')
+                softmax_value = mean_logits
+                print(f'softmax vals: {softmax_value}')
+                writer.add_scalar("action_probs/do_nothing", softmax_value[0], global_step)
+                writer.add_scalar("action_probs/left", softmax_value[1], global_step)
+                writer.add_scalar("action_probs/forward", softmax_value[2], global_step)
+                writer.add_scalar("action_probs/right",softmax_value[3], global_step)
+                writer.add_scalar("action_probs/stop_moving", softmax_value[4], global_step)
+                writer.add_scalar("charts/rollout_steps_per_second", args.batch_size/rollout_duration, global_step)
                 
-                #print(f'shape of subdata {subdata.shape}')
-                #print(f'example of subdata: {subdata}')
+                final_steps = tensordict_data[("next", "done")].squeeze()
+                writer.add_scalar("charts/total_rollout_duration", rollout_duration, global_step)
+                writer.add_scalar("stats/arrival_ratio", tensordict_data[("stats", "arrival_ratio")][torch.roll(final_steps, 1, -1)].mean(), global_step)
+                writer.add_scalar("stats/deadlock_ratio", tensordict_data[("stats", "deadlock_ratio")][torch.roll(final_steps, 1, -1)].mean(), global_step)
+                        
+            tensordict_data = tensordict_data.to('cuda')
+            tensordict_data.set(
+                ("next", "agents", "reward"),
+                tensordict_data.get(("next", "agents", "reward")).mean(-1))
+
+            #do we have n issue with averaging averages?
+            #print(f'averaged rewards: {tensordict_data[("next", "agents", "reward")]}')
+            
+            #are we averaging the rewards over all agents here? what's happening?
+            with torch.no_grad():
+                #tensordict_data = tensordict_data.flatten()
+                """ GAE(
+                    tensordict_data,
+                    params=loss_module.critic_params,
+                    target_params=loss_module.target_critic_params,
+                ) """
+                lastgaelam = torch.zeros(args.num_envs).to('cuda')
+                rollout_lengths = int(args.batch_size/args.num_envs)
+                tensordict_data['advantage'] = torch.zeros_like(tensordict_data['state_value']).to('cuda')
+                
+                #we get the value of the last rollout observation
+                next_val = model.get_value_operator()(tensordict_data[('next')][:,rollout_lengths-1])
+                #print(f'next vals: {next_val}')
+                
+                for t in reversed(range(rollout_lengths)):
+                    if t == rollout_lengths-1: # for the last one, we get the special values for the last observation
+                        nextnonterminal = ~tensordict_data[('next', 'done')][:,t].squeeze()
+                        #print(f'shape nextonterminal: {nextnonterminal.shape}')
+                        nextvalues = next_val['state_value'].squeeze()
+                    else:
+                        # for all other rollouts, we get the dones from the current t, and the values from the next t
+                        nextnonterminal = ~tensordict_data[('next', 'done')][:,t].squeeze()
+                        #print(f'next nonterminal: {nextnonterminal}')
+                        nextvalues = tensordict_data[('state_value')][:,t + 1].squeeze()
+                    #print(f'nextvalue: {nextvalues}')
+                    delta = (
+                        tensordict_data[('next', 'agents', 'reward')][:, t]
+                        + args.gamma * nextvalues * nextnonterminal
+                        - tensordict_data[('state_value')][:, t]
+                    )
+
+                    tensordict_data['advantage'][:,t] = lastgaelam = (
+                        delta
+                        + args.gamma
+                        * args.gae_lambda
+                        * nextnonterminal
+                        * lastgaelam
+                    ).flatten() #why do we do flatten here?
+
+                tensordict_data['value_target'] = tensordict_data['advantage'] + tensordict_data["state_value"]
+            
+            tensordict_data[("agents", "advantage")] = tensordict_data["advantage"].repeat_interleave(curriculum["num_agents"]).reshape(tensordict_data[("agents", "action")].shape).unsqueeze(-1)
+            
+            #print(f'advantage: {tensordict_data["advantage"]}')
+            #print(f'value_target: {tensordict_data["value_target"]}')
+            #print(f'state value: {tensordict_data["state_value"]}')
+
+            if args.track:
+                writer.add_scalar("internal_values/advantages_max", tensordict_data['advantage'].max(), global_step)
+                writer.add_scalar("internal_values/advantages_min", tensordict_data['advantage'].min(), global_step)
+            
+            data_view = tensordict_data.reshape(-1)
+            #print(f'shape of data view: {data_view.shape}')# Flatten the batch size to shuffle data
+            replay_buffer.extend(data_view)
+            #print(f'device of model: {model.device}')
+            for n_epoch in range(args.update_epochs):
+                print(f'epoch nr: {n_epoch}')
+                for _ in range(args.num_minibatches):
+                    subdata = replay_buffer.sample()
+                    
+                    loss_vals = loss_module(subdata)
+                    
+                    loss_value = (
+                        loss_vals["loss_objective"]
+                        + loss_vals["loss_critic"]
+                        + loss_vals["loss_entropy"]
+                    )
+                    
+                    loss_value.backward()
+
+                    torch.nn.utils.clip_grad_norm_(
+                        loss_module.parameters(), args.max_grad_norm
+                    )  # Optional
+
+                    optim.step()
+                    
+                    #for param in policy.parameters():
+                        #print(f'param grad in policy: {param.grad}')
+                    optim.zero_grad()
+            print(f'last loss is: {loss_value}')
+            training_duration =  time.time() - training_start
+            
+            collector.update_policy_weights_()   
+            
+            if args.track:
                 loss_vals = loss_module(subdata)
-                
-                #print(f'loss vals: {loss_vals}')
+                    
                 loss_value = (
                     loss_vals["loss_objective"]
                     + loss_vals["loss_critic"]
                     + loss_vals["loss_entropy"]
                 )
                 
-                loss_value.backward()
+                loss_value = loss_value/args.num_minibatches
+                writer.add_scalar(
+                    "charts/learning_rate", optim.param_groups[0]["lr"], global_step
+                )
+                writer.add_scalar("losses/value_loss", loss_vals["loss_critic"], global_step)
+                writer.add_scalar("losses/policy_loss", loss_vals["loss_objective"], global_step)
+                writer.add_scalar("losses/entropy", loss_vals["loss_entropy"], global_step)
 
-                torch.nn.utils.clip_grad_norm_(
-                    loss_module.parameters(), args.max_grad_norm
-                )  # Optional
+                writer.add_scalar("losses/total_loss", loss_value, global_step)
+                print("SPS:", int(global_step / (time.time() - start_time)))
+                writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+                writer.add_scalar("charts/training_speed", args.batch_size*args.update_epochs / training_duration, global_step)
+                writer.add_scalar("charts/total_training_duration", training_duration, global_step)
 
-                optim.step()
+                original_data_logprobs = data_view[("agents", "sample_log_prob")].clone()              
+                updated_data_logprobs = model(data_view)[("agents", "sample_log_prob")] #yes we overwrite the original data here, but it doesn't matter at this point
+                #also the trainign above does not save the log probs, so we do have to calculate them once more unfortunately
+                logratio = updated_data_logprobs - original_data_logprobs
+                #print(f'logatio: {logratio}')
+                approx_kl = ((logratio.exp() - 1) - logratio).mean()
+                writer.add_scalar("losses/approx_kl", approx_kl, global_step)
                 
-                #for param in policy.parameters():
-                    #print(f'param grad in policy: {param.grad}')
-                optim.zero_grad()
-        print(f'last loss is: {loss_value}')
-        training_duration =  time.time() - training_start
-        if args.track:
-            writer.add_scalar(
-                "charts/learning_rate", optim.param_groups[0]["lr"], global_step
-            )
-            writer.add_scalar("losses/value_loss", loss_vals["loss_critic"], global_step)
-            writer.add_scalar("losses/policy_loss", loss_vals["loss_objective"], global_step)
-            writer.add_scalar("losses/entropy", loss_vals["loss_entropy"], global_step)
-
-            writer.add_scalar("losses/total_loss", loss_value, global_step)
-            print("SPS:", int(global_step / (time.time() - start_time)))
-            writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-            writer.add_scalar("charts/training_speed", args.batch_size*args.update_epochs / training_duration, global_step)
-            writer.add_scalar("charts/total_training_duration", training_duration, global_step)
+                print(f'approx_kl: {approx_kl}')
+                if global_step % 50_000 == 0:
+                    torch.save({
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optim.state_dict(),
+                    }, f"model_checkpoints/{run_name}_" + str(global_step) + ".tar")
+                
             
-            
-            torch.save({
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optim.state_dict(),
-            }, f"model_checkpoints/{run_name}.tar")
-            
-        
-        #for param in model.parameters():
-            #print(param.data)        
-        collector.update_policy_weights_()        
-        start_rollout = time.time()
-        
-        
-        args.arrival_reward_coef = args.arrival_reward_coef * 0.5
-        print(f'arrival reward coef after reassignmet: {args.arrival_reward_coef}')
-        exit()
-        # Logging
+            #for param in model.parameters():
+                #print(param.data)    
+            start_rollout = time.time()
  

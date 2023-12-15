@@ -1,0 +1,22 @@
+[
+    {
+        "map_height": 35,
+        "map_width": 30,
+        "num_agents": 1,
+        "arrival_reward_coef": 1.0,
+        "env_reward_coef": 0.0,
+        "departure_reward_coef": 0,
+        "deadlock_penalty_coef": 0,
+        "total_timesteps": 1000
+    },
+    {
+        "map_height": 50,
+        "map_width": 30,
+        "num_agents": 20,
+        "arrival_reward_coef": 0,
+        "env_reward_coef": 0,
+        "departure_reward_coef": 0,
+        "deadlock_penalty_coef": 0,
+        "total_timesteps": 10000
+    }
+]

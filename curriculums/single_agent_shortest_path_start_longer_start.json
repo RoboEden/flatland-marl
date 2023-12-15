@@ -1,0 +1,35 @@
+[
+    {
+        "map_height": 25,
+        "map_width": 25,
+        "num_agents": 1,
+        "arrival_reward_coef": 5,
+        "delay_reward_coef": 0.0,
+        "shortest_path_reward_coef": 1.0,
+        "departure_reward_coef": 5,
+        "deadlock_penalty_coef": 0,
+        "total_timesteps": 600000
+    },
+    {
+        "map_height": 25,
+        "map_width": 25,
+        "num_agents": 10,
+        "arrival_reward_coef": 5,
+        "delay_reward_coef": 0.5,
+        "shortest_path_reward_coef": 0.5,
+        "departure_reward_coef": 0,
+        "deadlock_penalty_coef": 1,
+        "total_timesteps": 1000000
+    },
+    {
+        "map_height": 25,
+        "map_width": 25,
+        "num_agents": 10,
+        "arrival_reward_coef": 5,
+        "delay_reward_coef": 1,
+        "shortest_path_reward_coef": 0,
+        "departure_reward_coef": 0,
+        "deadlock_penalty_coef": 2.5,
+        "total_timesteps": 100000000
+    }
+]
