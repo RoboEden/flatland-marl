@@ -1,0 +1,11 @@
+poetry run python flatland_ppo_training_torchrl.py  \
+--num-envs 8 \
+--num-steps 125  \
+--vf-coef 0.01  \
+--ent-coef 0.01 \
+--max-grad-norm 0.7 \
+--learning-rate 2.5e-3 \
+--seed 1 \
+--track  \
+--exp-name "single_agent_priming_adding_agents_sequentially" \
+--curriculum-path "curriculums/adding_agents_sequentally.json"

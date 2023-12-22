@@ -71,15 +71,22 @@ from tqdm import tqdm
 
 from flatland_ppo_training_torchrl import td_torch_rail, RailEnvTd
 
+from solution.utils import VideoWriter
+from PIL import Image
+
+import os
+import shutil
+
 import time
+
+import re
 
 def parse_args():
     # fmt: off
     parser = argparse.ArgumentParser()
-    parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
-        help="whether to capture videos of the agent performances (check out `videos` folder)")
     parser.add_argument("--seed", type=int, default=1,
-        help="seed of the experiment")  
+        help="seed of the experiment")
+    parser.add_argument("--rollout-name", type=str, default=None)
     parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if toggled, `torch.backends.cudnn.deterministic=False`")
     parser.add_argument("--num-agents", type= int, default = 1,
@@ -87,9 +94,8 @@ def parse_args():
     parser.add_argument("--rollout-steps", type=int, default=1000, #for rollout
         help="the number of steps to run in each environment per policy rollout")
     parser.add_argument('--max-episode-steps', type=int, default=None)
-    parser.add_argument("--pretrained-network-path", type=str, default = "model_checkpoints/flatland-rl__torchrl_two_agents_small_map__1__1702288063.tar",
+    parser.add_argument("--pretrained-network-path", type=str, default = None,
         help="path to the pretrained network to be used")
-    parser.add_argument("--use-pretrained-network", action=argparse.BooleanOptionalAction)
     parser.add_argument("--do-render", action='store_true')
     parser.add_argument('--map-width', type=int, default=30)
     parser.add_argument('--map-height', type=int, default=35)
@@ -97,36 +103,13 @@ def parse_args():
         "--fps", type=float, default=2, help="frames per second (default 10)"
     )
     parser.add_argument("--render", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--video-path", type=str, default="videos/")
     args = parser.parse_args()
     # fmt: on
     return args
-
-class torchrl_flatland_render():
-    def __init__(self, td_env):
-        super().__init__()
-        self.env = td_env
-        self.env_renderer = RenderTool(
-            self.env.env,
-            agent_render_variant=AgentRenderVariant.AGENT_SHOWS_OPTIONS,
-            show_debug=False,
-            screen_height=600,  # Adjust these parameters to fit your resolution
-            screen_width=800,
-            show_observations=True,
-            show_predictions=True,
-            
-        )
-        
-    def _reset(self):
-        self.env_renderer.reset()
-        return self.env._reset()
-
-    def _step(self, action):
-        self.env_renderer.render_env(show=True, show_observations=False, show_predictions=False)
-        sleep(10)
-        return self.env._step(action)
     
 class td_torch_rail_render(td_torch_rail):
-    def __init__(self, env):
+    def __init__(self, env, saving_directory):
         super().__init__(env)        
         self.env = env
         self.num_agents = env.get_num_agents()
@@ -136,39 +119,22 @@ class td_torch_rail_render(td_torch_rail):
             agent_render_variant=AgentRenderVariant.ONE_STEP_BEHIND,
             show_debug=False,
             screen_height=600,  # Adjust these parameters to fit your resolution
-            screen_width=800,
-        )
-
+            screen_width=800,        )
+        self.step_nr = 0
+        self.saving_directory = saving_directory
+        
     def _reset(self, tensordict = None):
         self.env_renderer.reset()
         return self.env.reset()
-    
+
     def _step(self, tensordict):
-        self.env_renderer.render_env(show=True, show_observations=False, show_predictions=False)
+        self.env_renderer.render_env(show=True, show_observations=False, show_predictions=True)
+        image_rbg = self.env.render(show_predictions=True, screen_height = self.env.height*40, screen_width=self.env.width*40)
+        image = Image.fromarray(image_rbg.astype('uint8')).convert('RGB')
+        image.save(self.saving_directory + "rollout_video_" + str(self.step_nr) + ".jpg")
+        
+        self.step_nr += 1
         return self.env.step(tensordict)
-    
-def make_env():
-    td_env = RailEnvTd(
-        number_of_agents=args.num_agents,
-        width = args.map_width,
-        height = args.map_height,
-        rail_generator=SparseRailGen(
-            max_num_cities=3,
-            grid_mode=False,
-            max_rails_between_cities=2,
-            max_rail_pairs_in_city=2,
-        ),
-        line_generator=SparseLineGen(
-            speed_ratio_map={1.0: 1}
-        ),
-        malfunction_generator=ParamMalfunctionGen(
-            MalfunctionParameters(
-                malfunction_rate=1 / 4500, min_duration=20, max_duration=50)
-        ),
-        obs_builder_object=TreeCutils(31, 500),
-    )
-    td_env.reset()
-    return td_torch_rail_render(td_env)
 
 if __name__ == "__main__":
     print('starting main')
@@ -176,6 +142,20 @@ if __name__ == "__main__":
     print(f'check if in venv: {sys.prefix == sys.base_prefix}')
     print(sys.argv)
     args = parse_args()
+    
+    saving_directory = "videos/"
+    temp_directory = saving_directory + "temp/"
+    os.mkdir(temp_directory)
+    if args.pretrained_network_path is not None:
+        pretrained_network_name = re.sub(".tar", "", args.pretrained_network_path)
+        pretrained_network_name = re.sub(".*/", "", pretrained_network_name)
+    else:
+        pretrained_network_name = ""
+    
+    if args.rollout_name is None:
+        rollout_name = pretrained_network_name + "_rollout_" + str(time.time())
+    else:
+        rollout_name = pretrained_network_name + args.rollout_name
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -205,12 +185,11 @@ if __name__ == "__main__":
         )
         td_env.reset()
         if args.do_render:
-            return td_torch_rail_render(td_env)
+            return td_torch_rail_render(td_env, temp_directory)
         else:
             return td_torch_rail(td_env)
 
     env = ParallelEnv(1, make_env)
-    
     
     print('set up envs')
 
@@ -265,7 +244,7 @@ if __name__ == "__main__":
     
     print(f'device of critic module: {critic_module.device}')
     
-    if args.use_pretrained_network:
+    if args.pretrained_network_path is not None:
         model_path = args.pretrained_network_path
         assert (model_path.endswith('tar')), 'Network format not known.'
         checkpoint = torch.load(model_path)
@@ -287,6 +266,8 @@ if __name__ == "__main__":
     
     results_td = collector.rollout()
     
+    os.system("ffmpeg -r 2 -i " + temp_directory + "/rollout_video_%01d.jpg -y " + saving_directory + rollout_name + "_video.mp4")
+    shutil.rmtree(temp_directory)
     final_steps = results_td[("next", "done")].squeeze()
     final_reward = results_td[("next", "agents", "reward")].squeeze()[torch.roll(final_steps, 1, -1)].sum(-1).mean()
     print(f'arrival ratio: {results_td[("stats", "arrival_ratio")].squeeze()[torch.roll(final_steps, 1, -1)].mean()}')

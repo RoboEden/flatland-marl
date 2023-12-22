@@ -153,6 +153,7 @@ def parse_args():
     parser.add_argument('--departure-reward-coef', type=float, default=0)
     parser.add_argument('--arrival-reward-coef', type=float, default=5)
     parser.add_argument('--deadlock-penalty-coef', type=float, default=0)
+    parser.add_argument('--arrival-delay-penalty-coef', type=float, default=0)
     parser.add_argument('--initialize-action-weights', action=argparse.BooleanOptionalAction)
     parser.add_argument('--max-episode-steps', type=int, default=None)
     parser.add_argument('--force-shortest-path', action=argparse.BooleanOptionalAction)
@@ -271,10 +272,14 @@ class RailEnvTd(RailEnv):
             valid_actions, dtype=torch.bool
         )
         n_arrival = 0
+        n_on_time_arrival = 0
         for agent in self.agents:
             if agent.state == TrainState.DONE:
                 n_arrival += 1
+                if agent.arrival_time <= agent.latest_arrival:
+                    n_on_time_arrival += 1
         return_td[("stats", "arrival_ratio")] = torch.tensor(n_arrival/self.number_of_agents, dtype = torch.float32)
+        return_td[("stats", "on_time_arrival_ratio")] = torch.tensor(n_arrival/self.number_of_agents, dtype = torch.float32)
         self.previous_deadlocked = self.motionCheck.svDeadlocked
         n_deadlocked_agents = len(self.previous_deadlocked)
         return_td[("stats", "deadlock_ratio")] = torch.tensor(n_deadlocked_agents/self.number_of_agents, dtype = torch.float32)
@@ -284,7 +289,7 @@ class RailEnvTd(RailEnv):
 
     def update_step_rewards(self, i_agent):
         agent = self.agents[i_agent]
-        delay_reward = shortest_path_reward = arrival_reward = deadlock_penalty = departure_reward = 0
+        delay_reward = shortest_path_reward = arrival_reward = deadlock_penalty = departure_reward = arrival_delay_penalty = 0
         if self.delay_reward_coef != 0:        
             # we start giving the model rewards as soon as the agent can actually choose actions
             if (agent.earliest_departure <= self._elapsed_steps) and agent.state != TrainState.DONE:
@@ -295,38 +300,46 @@ class RailEnvTd(RailEnv):
                 shortest_path_reward = agent.get_current_delay(self._elapsed_steps, self.distance_map)
         
         if self.arrival_reward_coef != 0:
-            if agent.state == TrainState.DONE and agent.state_machine.previous_state != TrainState.DONE: 
+            if agent.state == TrainState.DONE and agent.state_machine.previous_state != TrainState.DONE and self._elapsed_steps <= agent.latest_arrival: 
                 # only give arrival reward once
                 arrival_reward = 1
 
         if self.deadlock_penalty_coef != 0:
             if (agent.position in self.motionCheck.svDeadlocked) and (agent.position not in self.previous_deadlocked):
-                deadlock_penalty = 1
+                deadlock_penalty = -1
             
         if self.departure_reward_coef != 0:
             if (agent.state.is_on_map_state() and agent.state_machine.previous_state.is_off_map_state()):
-                departure_reward = 1            
+                departure_reward = 1        
+                
+        if self.arrival_delay_penalty_coef != 0:
+            if agent.state == TrainState.DONE and agent.state_machine.previous_state != TrainState.DONE: 
+                arrival_delay_penalty = min(agent.get_current_delay(self._elapsed_steps, self.distance_map), 0)
+                
         self.rewards_dict[i_agent] += (self.delay_reward_coef*delay_reward + 
                                        self.shortest_path_reward_coef*shortest_path_reward + 
                                        self.arrival_reward_coef*arrival_reward + 
                                        self.deadlock_penalty_coef*deadlock_penalty + 
-                                       self.departure_reward_coef*departure_reward)
+                                       self.departure_reward_coef*departure_reward +
+                                       self.arrival_delay_penalty_coef*arrival_delay_penalty)
     
-    def set_reward_coef(self, delay_reward_coef, shortest_path_reward_coef, arrival_reward_coef, deadlock_penalty_coef, departure_reward_coef):
+    def set_reward_coef(self, delay_reward_coef, shortest_path_reward_coef, arrival_reward_coef, deadlock_penalty_coef, departure_reward_coef, arrival_delay_penalty_coef):
         self.delay_reward_coef = delay_reward_coef
         self.shortest_path_reward_coef = shortest_path_reward_coef
         self.arrival_reward_coef = arrival_reward_coef
         self.deadlock_penalty_coef = deadlock_penalty_coef
         self.departure_reward_coef = departure_reward_coef
-        
+        self.arrival_delay_penalty_coef = arrival_delay_penalty_coef
     
     def _handle_end_reward(self, agent: EnvAgent) -> int:
-        if True:
+        if agent.state == TrainState.DONE:
             #print("end of episode status: {}".format(agent.state))
             return 0
         else:
-            print(f'agent: {agent}')
-            super()._handle_end_reward(self, agent)
+            if self.arrival_delay_penalty_coef != 0: # only return this if we are giving arrival delay penalties anyway
+                return min(agent.get_current_delay(self._elapsed_steps, self.distance_map), 0)
+        
+        return 0
 
 class td_torch_rail(EnvBase):
     def __init__(self, env):
@@ -384,6 +397,7 @@ class td_torch_rail(EnvBase):
             ),
             stats = CompositeSpec(
                 arrival_ratio = UnboundedContinuousTensorSpec(shape = [], dtype = torch.float32),
+                on_time_arrival_ratio = UnboundedContinuousTensorSpec(shape = [], dtype = torch.float32),
                 deadlock_ratio = UnboundedContinuousTensorSpec(shape = [], dtype = torch.float32),
                 shape = []
             ),
@@ -579,6 +593,8 @@ if __name__ == "__main__":
     run_name = (
         f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     )
+    os.mkdir(f"model_checkpoints/{run_name}")
+    
     if args.track:
         print('initializing tracking')
 
@@ -660,7 +676,8 @@ if __name__ == "__main__":
 
     print('collector done')
     from torchrl.data import TensorDictReplayBuffer
-
+    
+    
     loss_module = ClipPPOLoss(
         actor=ProbabilisticTensorDictSequential(common_module, policy),
         critic=critic_module,
@@ -670,6 +687,8 @@ if __name__ == "__main__":
         normalize_advantage=args.norm_adv,  # Important to avoid normalizing across the agent dimension
         loss_critic_type = "smooth_l1",
     )
+    
+    print(f'clip coef: {args.clip_coef}')
 
     loss_module.set_keys(  # We have to tell the loss where to find the keys
         #reward=env.reward_key,
@@ -686,7 +705,7 @@ if __name__ == "__main__":
     )  # We build GAE
     GAE = loss_module.value_estimator """
     
-    optim = torch.optim.Adam(loss_module.parameters(), lr=2.5e-4, weight_decay=1e-5)
+    optim = torch.optim.Adam(loss_module.parameters(), lr=args.learning_rate, weight_decay=1e-7)
     
     pbar = tqdm(total=n_iters, desc="episode_reward_mean = 0")
 
@@ -708,6 +727,7 @@ if __name__ == "__main__":
              "shortest_path_reward_coef": args.shortest_path_reward_coef,
              "departure_reward_coef": args.departure_reward_coef,
              "deadlock_penalty_coef": args.deadlock_penalty_coef,
+             "arrival_delay_penalty_coef": args.arrival_delay_penalty_coef,
              "total_timesteps": args.total_timesteps,
              },
         ]
@@ -743,7 +763,8 @@ if __name__ == "__main__":
                                    delay_reward_coef=curriculum["delay_reward_coef"],
                                    arrival_reward_coef=curriculum["arrival_reward_coef"], 
                                    deadlock_penalty_coef=curriculum["deadlock_penalty_coef"], 
-                                   departure_reward_coef=curriculum["departure_reward_coef"])
+                                   departure_reward_coef=curriculum["departure_reward_coef"],
+                                   arrival_delay_penalty_coef=curriculum["arrival_delay_penalty_coef"])
             td_env.reset()
             return td_torch_rail(td_env)
         
@@ -778,6 +799,7 @@ if __name__ == "__main__":
             #print(f'device of tensordict data: {tensordict_data.device}')
             #print(f'example of tensordict data: {tensordict_data}')
             # log data about collector:
+
             if args.track:
                 writer.add_scalar(
                     "rewards/min", tensordict_data[('next', 'agents', 'reward')].min(), global_step
@@ -803,8 +825,16 @@ if __name__ == "__main__":
                 final_steps = tensordict_data[("next", "done")].squeeze()
                 writer.add_scalar("charts/total_rollout_duration", rollout_duration, global_step)
                 writer.add_scalar("stats/arrival_ratio", tensordict_data[("stats", "arrival_ratio")][torch.roll(final_steps, 1, -1)].mean(), global_step)
+                writer.add_scalar("stats/on_time_arrival_ratio", tensordict_data[("stats", "on_time_arrival_ratio")][torch.roll(final_steps, 1, -1)].mean(), global_step)
                 writer.add_scalar("stats/deadlock_ratio", tensordict_data[("stats", "deadlock_ratio")][torch.roll(final_steps, 1, -1)].mean(), global_step)
-                        
+                
+                writer.add_scalar("action_frequency/do_nothing", (tensordict_data[("agents", "action")] == 0).sum()/(args.batch_size*curriculum["num_agents"]), global_step)
+                writer.add_scalar("action_frequency/left", (tensordict_data[("agents", "action")] == 1).sum()/(args.batch_size*curriculum["num_agents"]), global_step)
+                writer.add_scalar("action_frequency/forward", (tensordict_data[("agents", "action")] == 2).sum()/(args.batch_size*curriculum["num_agents"]), global_step)
+                writer.add_scalar("action_frequency/right", (tensordict_data[("agents", "action")] == 3).sum()/(args.batch_size*curriculum["num_agents"]), global_step)
+                writer.add_scalar("action_frequency/stop_moving", (tensordict_data[("agents", "action")] == 4).sum()/(args.batch_size*curriculum["num_agents"]), global_step)
+                
+
             tensordict_data = tensordict_data.to('cuda')
             tensordict_data.set(
                 ("next", "agents", "reward"),
@@ -869,10 +899,14 @@ if __name__ == "__main__":
             data_view = tensordict_data.reshape(-1)
             #print(f'shape of data view: {data_view.shape}')# Flatten the batch size to shuffle data
             replay_buffer.extend(data_view)
+            
+            approx_kl_minibatch = torch.zeros(args.num_minibatches)
+            old_approx_kl_minibatch = torch.zeros(args.num_minibatches)
+            clip_frac = torch.zeros(args.num_minibatches)
             #print(f'device of model: {model.device}')
             for n_epoch in range(args.update_epochs):
                 print(f'epoch nr: {n_epoch}')
-                for _ in range(args.num_minibatches):
+                for n_minibatch in range(args.num_minibatches):
                     subdata = replay_buffer.sample()
                     
                     loss_vals = loss_module(subdata)
@@ -883,6 +917,21 @@ if __name__ == "__main__":
                         + loss_vals["loss_entropy"]
                     )
                     
+                    if n_epoch == args.update_epochs - 1:
+                        original_data_logprobs = subdata[("agents", "sample_log_prob")].clone()
+                        original_actions = subdata[("agents", "action")].clone()
+                        with torch.no_grad():
+                            #model.eval()
+                            updated_logits = model(subdata.clone())[("agents", "logits")]
+                            dist = torch.distributions.Categorical(logits = updated_logits)
+                            updated_data_logprobs = dist.log_prob(original_actions)
+                            #model.train()
+                        logratio = updated_data_logprobs - original_data_logprobs
+                        #print(f'logratio: {logratio}')
+                        approx_kl_minibatch[n_minibatch] = ((logratio.exp() - 1) - logratio).mean() 
+                        old_approx_kl_minibatch[n_minibatch]= (-logratio).mean()
+                        clip_frac[n_minibatch] = ((logratio.exp() - 1.0).abs() > args.clip_coef).float().mean()
+                        
                     loss_value.backward()
 
                     torch.nn.utils.clip_grad_norm_(
@@ -891,9 +940,9 @@ if __name__ == "__main__":
 
                     optim.step()
                     
-                    #for param in policy.parameters():
-                        #print(f'param grad in policy: {param.grad}')
                     optim.zero_grad()
+                    collector.update_policy_weights_()                     
+                    
             print(f'last loss is: {loss_value}')
             training_duration =  time.time() - training_start
             
@@ -922,23 +971,28 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/training_speed", args.batch_size*args.update_epochs / training_duration, global_step)
                 writer.add_scalar("charts/total_training_duration", training_duration, global_step)
 
-                original_data_logprobs = data_view[("agents", "sample_log_prob")].clone()              
+                """original_data_logprobs = data_view[("agents", "sample_log_prob")].clone()              
                 updated_data_logprobs = model(data_view)[("agents", "sample_log_prob")] #yes we overwrite the original data here, but it doesn't matter at this point
                 #also the trainign above does not save the log probs, so we do have to calculate them once more unfortunately
                 logratio = updated_data_logprobs - original_data_logprobs
                 #print(f'logatio: {logratio}')
                 approx_kl = ((logratio.exp() - 1) - logratio).mean()
-                writer.add_scalar("losses/approx_kl", approx_kl, global_step)
+                old_approx_kl = (-logratio).mean()
+                writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
+                writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)"""
+                writer.add_scalar("losses/approx_kl_minibatch_mean", approx_kl_minibatch.mean(), global_step)
+                writer.add_scalar("losses/old_approx_kl_approch_kl_minibatch_mean", old_approx_kl_minibatch.mean(), global_step)
+                writer.add_scalar("losses/clipfrac_mean", clip_frac.mean(), global_step)
+                writer.add_scalar("losses/approx_kl_minibatch_max", approx_kl_minibatch.max(), global_step)
+                writer.add_scalar("losses/old_approx_kl_approch_kl_minibatch_max", old_approx_kl_minibatch.max(), global_step)
+                writer.add_scalar("losses/clipfrac_max", clip_frac.max(), global_step)
                 
-                print(f'approx_kl: {approx_kl}')
                 if global_step % 50_000 == 0:
                     torch.save({
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optim.state_dict(),
-                    }, f"model_checkpoints/{run_name}_" + str(global_step) + ".tar")
+                    }, f"model_checkpoints/{run_name}/{run_name}_" + str(global_step) + ".tar")
                 
-            
             #for param in model.parameters():
                 #print(param.data)    
             start_rollout = time.time()
- 
