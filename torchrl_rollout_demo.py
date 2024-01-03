@@ -69,7 +69,7 @@ torch.manual_seed(0)
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
-from flatland_ppo_training_torchrl import td_torch_rail, RailEnvTd
+from ppo_training_torchrl import td_torch_rail, RailEnvTd
 
 from solution.utils import VideoWriter
 from PIL import Image

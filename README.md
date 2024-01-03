@@ -12,6 +12,10 @@ The installation of the C-utils obersvation generator does not work via poetry, 
 poetry run pip install ./flatland_cutils
 ```
 
+## Training
+
+To train flatland, run flatland_ppo_training_torchrl.py.
+
 # Sources
 
 The C-Utils observation generator and the LSTM network implementation stems from https://github.com/RoboEden/flatland-marl.
