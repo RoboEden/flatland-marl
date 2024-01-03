@@ -9,7 +9,7 @@
         "departure_reward_coef": 0,
         "deadlock_penalty_coef": 5,
         "arrival_delay_penalty_coef": 0,
-        "total_timesteps": 1000000
+        "total_timesteps": 2000000
     },
     {
         "map_height": 25,
@@ -21,7 +21,7 @@
         "departure_reward_coef": 0,
         "deadlock_penalty_coef": 5,
         "arrival_delay_penalty_coef": 0,
-        "total_timesteps": 1000000
+        "total_timesteps": 5000000
     },
     {
         "map_height": 25,
@@ -33,7 +33,7 @@
         "departure_reward_coef": 0,
         "deadlock_penalty_coef": 5,
         "arrival_delay_penalty_coef": 0,
-        "total_timesteps": 1000000
+        "total_timesteps": 5000000
     },
     {
         "map_height": 25,
@@ -45,6 +45,6 @@
         "departure_reward_coef": 0,
         "deadlock_penalty_coef": 5,
         "arrival_delay_penalty_coef": 0,
-        "total_timesteps": 10000000
+        "total_timesteps": 100000000
     }
 ]

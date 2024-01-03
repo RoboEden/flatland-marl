@@ -1,0 +1,14 @@
+[
+    {
+        "map_height": 25,
+        "map_width": 25,
+        "num_agents": 50,
+        "arrival_reward_coef": 5,
+        "delay_reward_coef": 0.0,
+        "shortest_path_reward_coef": 0,
+        "departure_reward_coef": 0,
+        "deadlock_penalty_coef": 5,
+        "arrival_delay_penalty_coef": 0,
+        "total_timesteps": 100000000
+    }
+]
