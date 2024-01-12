@@ -3,20 +3,15 @@ import json
 import os
 import random
 import time
-from distutils.util import strtobool
-from typing import Optional
 
 import numpy as np
 import torch
-from flatland.envs.agent_utils import EnvAgent
 from flatland.envs.line_generators import SparseLineGen
 from flatland.envs.rail_generators import SparseRailGen
 from flatland.envs.malfunction_generators import (
     MalfunctionParameters,
     ParamMalfunctionGen,
 )
-from flatland.envs.rail_env import RailEnv
-from flatland.envs.step_utils.states import TrainState
 from tensordict.nn import (
     InteractionType,
     ProbabilisticTensorDictSequential,
@@ -25,12 +20,10 @@ from tensordict.nn import (
 from tensordict.tensordict import TensorDict
 from torch import optim
 from torch.utils.tensorboard import SummaryWriter
-from torchrl.collectors import SyncDataCollector
+from torchrl.collectors import SyncDataCollector, MultiSyncDataCollector, MultiaSyncDataCollector
 from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
 from torchrl.data.replay_buffers.storages import LazyTensorStorage
-
-# Env
-from torchrl.envs import ParallelEnv
+from torchrl.envs import ParallelEnv, SerialEnv
 from torchrl.modules import ProbabilisticActor
 from torchrl.objectives import ClipPPOLoss
 from torchrl.modules import ActorValueOperator, ValueOperator
@@ -38,8 +31,8 @@ from torchrl.data import TensorDictReplayBuffer
 
 from flatland_cutils import TreeObsForRailEnv as TreeCutils
 from solution.nn.net_tree_torchrl import actor_net, critic_net, embedding_net
-from TorchRLRailEnv import TorchRLRailEnv, TDRailEnv
-
+from solution.nn.net_tree_transformer import transformer_embedding_net
+from flatland_torchrl.torchrl_rail_env import TorchRLRailEnv, TDRailEnv
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -61,7 +54,7 @@ def parse_args():
         "--env-id", type=str, default="flatland-rl", help="the id of the environment"
     )
     parser.add_argument(
-        "--num-agents", type=int, default=1, help="number of agents in the environment"
+        "--num-agents", type=int, default=2, help="number of agents in the environment"
     )
     parser.add_argument(
         "--total-timesteps",
@@ -135,28 +128,24 @@ def parse_args():
     parser.add_argument(
         "--delay-reward-coef",
         type=float,
-        default=1,
-        help="Toggles whether to use the default flatland env reward at each step",
+        default=0,
     )
     parser.add_argument(
         "--shortest-path-reward-coef",
         type=float,
         default=0,
-        help="Toggles whether to use the default flatland env reward at each step",
     )
     parser.add_argument("--departure-reward-coef", type=float, default=0)
-    parser.add_argument("--arrival-reward-coef", type=float, default=5)
+    parser.add_argument("--arrival-reward-coef", type=float, default=1)
     parser.add_argument("--deadlock-penalty-coef", type=float, default=0)
     parser.add_argument("--arrival-delay-penalty-coef", type=float, default=0)
     parser.add_argument("--map-width", type=int, default=30)
     parser.add_argument("--map-height", type=int, default=35)
     parser.add_argument("--curriculum-path", type=str, default=None)
+    
+    parser.add_argument('--do-multisync', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--use-transformer-embedding', action=argparse.BooleanOptionalAction, default=False)
     args = parser.parse_args()
-
-    args.batch_size = int(args.num_envs * args.num_steps)
-    args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    print(f"minibatch size: {args.minibatch_size}")
-    print(f"batch size: {args.batch_size}")
 
     return args
 
@@ -175,20 +164,29 @@ if __name__ == "__main__":
             "|param|value|\n|-|-|\n%s"
             % "\n".join([f"|{key}|{value}|" for key, value in vars(args).items()]),
         )
-
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.use_torch_deterministic
+    print(f'using deterministic: {args.use_torch_deterministic}')
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     print(f"device used: {device}")
 
-    common_module = TensorDictModule(
-        embedding_net(),
-        in_keys=[("agents", "observation")],
-        out_keys=[("hidden", "embedding"), ("hidden", "att_embedding")],
-    )
+    #Set-up of the neural network
+    
+    if args.use_transformer_embedding:
+        common_module = TensorDictModule(
+            transformer_embedding_net(),
+            in_keys=[("agents", "observation")],
+            out_keys=[("hidden", "embedding"), ("hidden", "att_embedding")],
+        )
+    else:
+        common_module = TensorDictModule(
+            embedding_net(),
+            in_keys=[("agents", "observation")],
+            out_keys=[("hidden", "embedding"), ("hidden", "att_embedding")],
+        )
 
     actor_module = TensorDictModule(
         actor_net(),
@@ -208,7 +206,7 @@ if __name__ == "__main__":
         return_log_prob=True,
         log_prob_key=("agents", "sample_log_prob"),
         cache_dist=True,
-        default_interaction_type=InteractionType.RANDOM,
+        default_interaction_type=InteractionType.RANDOM, #we sample actions randomly
     )
 
     critic_module = ValueOperator(
@@ -226,6 +224,8 @@ if __name__ == "__main__":
         model.load_state_dict(checkpoint["model_state_dict"])
         print("loaded pretrained model from .tar file")
 
+    #Set-Up loss module
+    
     loss_module = ClipPPOLoss(
         actor=ProbabilisticTensorDictSequential(common_module, policy),
         critic=critic_module,
@@ -236,7 +236,7 @@ if __name__ == "__main__":
         loss_critic_type="smooth_l1",
     )
 
-    loss_module.set_keys(  # We have to tell the loss where to find the keys
+    loss_module.set_keys(
         action=("agents", "action"),
         sample_log_prob=("agents", "sample_log_prob"),
         value=("state_value"),
@@ -251,6 +251,9 @@ if __name__ == "__main__":
 
     global_step = 0
 
+    
+    # load learning curriculum 
+    
     if args.curriculum_path is not None:
         curriculums = open(args.curriculum_path)
         curriculums = json.load(curriculums)
@@ -261,13 +264,9 @@ if __name__ == "__main__":
                 "map_height": args.map_height,
                 "map_width": args.map_width,
                 "num_agents": args.num_agents,
-                "arrival_reward_coef": args.arrival_reward_coef,
-                "delay_reward_coef": args.delay_reward_coef,
-                "shortest_path_reward_coef": args.shortest_path_reward_coef,
-                "departure_reward_coef": args.departure_reward_coef,
-                "deadlock_penalty_coef": args.deadlock_penalty_coef,
-                "arrival_delay_penalty_coef": args.arrival_delay_penalty_coef,
+                "reward_coefs": None,
                 "total_timesteps": args.total_timesteps,
+                "num_steps": args.num_steps
             },
         ]
 
@@ -275,9 +274,13 @@ if __name__ == "__main__":
 
     # Start PPO loop
     for curriculum in curriculums:
-        print(f"curriculum: {curriculum}")
+        print(f"Current curriculum settings: {curriculum}")
+        args.batch_size = int(args.num_envs * curriculum["num_steps"]) #size of data used for training
+        args.minibatch_size = int(args.batch_size // args.num_minibatches)
+        print(f"minibatch size: {args.minibatch_size}")
+        print(f"batch size: {args.batch_size}")
 
-        def make_env():
+        def make_env() -> TorchRLRailEnv:
             """Generate a random rail environment"""
             td_env = TDRailEnv(
                 number_of_agents=curriculum["num_agents"],
@@ -298,44 +301,75 @@ if __name__ == "__main__":
                 obs_builder_object=TreeCutils(31, 500),
             )
 
-            td_env.set_reward_coef(
-                shortest_path_reward_coef=curriculum["shortest_path_reward_coef"],
-                delay_reward_coef=curriculum["delay_reward_coef"],
-                arrival_reward_coef=curriculum["arrival_reward_coef"],
-                deadlock_penalty_coef=curriculum["deadlock_penalty_coef"],
-                departure_reward_coef=curriculum["departure_reward_coef"],
-                arrival_delay_penalty_coef=curriculum["arrival_delay_penalty_coef"],
+            td_env.set_reward_coef(curriculum['reward_coefs']
             )
             td_env.reset()
             return TorchRLRailEnv(td_env)
 
-        env = ParallelEnv(args.num_envs, make_env)
+        
+        if args.do_multisync:
+            print('doing multisync')
+            def make_serial_env():
+                return ParallelEnv(args.num_envs, make_env)
+            
+            collector = MultiaSyncDataCollector(
+                [make_serial_env, make_serial_env, make_serial_env],
+                model,
+                device=["cpu", "cpu", "cpu"], # env runs on cpu
+                storing_device=[device, device, device],
+                frames_per_batch=args.batch_size,
+                total_frames=curriculum["total_timesteps"],
+                update_at_each_batch=True,
+                max_frames_per_traj=-1,
+                init_random_frames=args.batch_size
+            )
+        else:
+            env = ParallelEnv(args.num_envs, make_env)
 
-        collector = SyncDataCollector(
-            env,
-            model,
-            device="cpu",
-            storing_device=device,
-            frames_per_batch=args.batch_size,
-            total_frames=curriculum["total_timesteps"],
-        )
+            collector = SyncDataCollector(
+                env,
+                model,
+                device="cpu", # env runs on cpu
+                storing_device=device,
+                frames_per_batch=args.batch_size,
+                total_frames=curriculum["total_timesteps"],
+            )
 
         replay_buffer = TensorDictReplayBuffer(
             storage=LazyTensorStorage(
                 args.batch_size, device=device
-            ),  # We store the frames_per_batch collected at each iteration
+            ),
             sampler=SamplerWithoutReplacement(),
-            batch_size=args.minibatch_size,  # We will sample minibatches of this size
-        )
+            batch_size=args.minibatch_size,
+        )        
 
         start_rollout = time.time()
-        for tensordict_data in collector:
+        
+        collector.update_policy_weights_()
+        
+        for i_batch, tensordict_data in enumerate(collector): #start training loops
+            if i_batch<3:
+                print("warm up iteration")
+                continue
             rollout_duration = time.time() - start_rollout
             training_start = time.time()
             print(f"duration rollout: {time.time()-start_time}")
             global_step += args.batch_size
             print(f"global step: {global_step}")
-
+            
+            if False:
+                print(f'tensordict data: {tensordict_data}')
+                print(f' rewards: {tensordict_data[("next", "agents", "reward")]}')
+                print(f'rewards all 0: {torch.all(tensordict_data["next", "agents", "reward"]==0)}')
+                print(f'all observations 0: {torch.all(tensordict_data[("agents", "observation", "node_attr")]==0)}')
+                #exit()
+            
+            assert tensordict_data[("next", "agents", "reward")].shape == torch.Size([args.num_envs, curriculum["num_steps"], curriculum["num_agents"]])
+            assert tensordict_data[("next", "agents", "observation", "agents_attr")].shape == torch.Size([args.num_envs, curriculum["num_steps"], curriculum["num_agents"], 83])
+            assert tensordict_data[("agents", "action")].shape == torch.Size([args.num_envs, curriculum["num_steps"], curriculum["num_agents"]])
+            assert tensordict_data["state_value"].shape == torch.Size([args.num_envs, curriculum["num_steps"]])
+                        
+            #track info of rollout
             if args.exp_name is not None:
                 writer.add_scalar(
                     "rewards/min",
@@ -369,33 +403,23 @@ if __name__ == "__main__":
                     args.batch_size / rollout_duration,
                     global_step,
                 )
-
                 final_steps = tensordict_data[("next", "done")].squeeze()
                 writer.add_scalar(
                     "charts/total_rollout_duration", rollout_duration, global_step
                 )
+                print(f'shape of final steps: {final_steps.shape}')
+                print(f'shape of td data: {tensordict_data[("next", "agents", "observation", "agents_attr")].shape}')
+                final_stats = tensordict_data[("next", "agents", "observation", "agents_attr")][final_steps][:,:,(6,41)].mean((0,1))
                 writer.add_scalar(
                     "stats/arrival_ratio",
-                    tensordict_data[("stats", "arrival_ratio")][
-                        torch.roll(final_steps, 1, -1)
-                    ].mean(),
-                    global_step,
-                )
-                writer.add_scalar(
-                    "stats/on_time_arrival_ratio",
-                    tensordict_data[("stats", "on_time_arrival_ratio")][
-                        torch.roll(final_steps, 1, -1)
-                    ].mean(),
+                    final_stats[0],
                     global_step,
                 )
                 writer.add_scalar(
                     "stats/deadlock_ratio",
-                    tensordict_data[("stats", "deadlock_ratio")][
-                        torch.roll(final_steps, 1, -1)
-                    ].mean(),
+                    final_stats[1],
                     global_step,
                 )
-
                 writer.add_scalar(
                     "action_frequency/do_nothing",
                     (tensordict_data[("agents", "action")] == 0).sum()
@@ -427,24 +451,29 @@ if __name__ == "__main__":
                     global_step,
                 )
 
+            #Prepare rollout data for training
             tensordict_data = tensordict_data.to(device)
             tensordict_data.set(
                 ("next", "agents", "reward"),
                 tensordict_data.get(("next", "agents", "reward")).mean(-1),
-            )
+            ) #we average rewards over all agents in an env step
             
+            # Calculation of generalized advantage estimator
+            # based on https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py
             with torch.no_grad():
                 lastgaelam = torch.zeros(args.num_envs).to(device)
-                rollout_lengths = int(args.batch_size / args.num_envs)
                 tensordict_data["advantage"] = torch.zeros_like(
                     tensordict_data["state_value"]
-                ).to(device)
+                ).to(device) # only one advantage per environment and step
+                
+                # get value of final observations
                 next_val = model.get_value_operator()(
-                    tensordict_data[("next")][:, rollout_lengths - 1]
+                    tensordict_data[("next")][:, curriculum["num_steps"] - 1]
                 )
-                for t in reversed(range(rollout_lengths)):
+                
+                for t in reversed(range(curriculum["num_steps"])):
                     if (
-                        t == rollout_lengths - 1
+                        t == curriculum["num_steps"] - 1
                     ):  # for the last one, we get the special values for the last observation
                         nextnonterminal = ~tensordict_data[("next", "done")][
                             :, t
@@ -452,7 +481,8 @@ if __name__ == "__main__":
                         # print(f'shape nextonterminal: {nextnonterminal.shape}')
                         nextvalues = next_val["state_value"].squeeze()
                     else:
-                        # for all other rollouts, we get the dones from the current t, and the values from the next t
+                        # for all other rollouts, we get the dones from the current t, 
+                        # and the values from the next t
                         nextnonterminal = ~tensordict_data[("next", "done")][
                             :, t
                         ].squeeze()
@@ -468,73 +498,73 @@ if __name__ == "__main__":
                     tensordict_data["advantage"][:, t] = lastgaelam = (
                         delta
                         + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
-                    ).flatten()  # why do we do flatten here?
+                    ).flatten()  
 
                 tensordict_data["value_target"] = (
                     tensordict_data["advantage"] + tensordict_data["state_value"]
                 )
 
+            # now repeat the same advantage for each agent such that loss calculation works
             tensordict_data[("agents", "advantage")] = (
                 tensordict_data["advantage"]
                 .repeat_interleave(curriculum["num_agents"])
                 .reshape(tensordict_data[("agents", "action")].shape)
                 .unsqueeze(-1)
             )
+            
+            assert(tensordict_data[("agents", "advantage")].shape == torch.Size([args.num_envs, curriculum["num_steps"], curriculum["num_agents"], 1]))
+            assert(tensordict_data[("agents", "sample_log_prob")].shape ==  torch.Size([args.num_envs, curriculum["num_steps"], curriculum["num_agents"]]))
 
-            if args.exp_name is not None:
-                writer.add_scalar(
-                    "internal_values/advantages_max",
-                    tensordict_data["advantage"].max(),
-                    global_step,
-                )
-                writer.add_scalar(
-                    "internal_values/advantages_min",
-                    tensordict_data["advantage"].min(),
-                    global_step,
-                )
-
+            # Combine data from all parallel envs and send to buffer
             data_view = tensordict_data.reshape(-1)
             replay_buffer.extend(data_view)
 
-            approx_kl_minibatch = torch.zeros(args.num_minibatches)
-            old_approx_kl_minibatch = torch.zeros(args.num_minibatches)
-            clip_frac = torch.zeros(args.num_minibatches)
+            if args.exp_name is not None:
+                approx_kl_minibatch = torch.zeros(args.num_minibatches)
+                old_approx_kl_minibatch = torch.zeros(args.num_minibatches)
+                clip_frac = torch.zeros(args.num_minibatches)
+            
             for n_epoch in range(args.update_epochs):
                 print(f"epoch nr: {n_epoch}")
                 for n_minibatch in range(args.num_minibatches):
-                    subdata = replay_buffer.sample()
-
+                    subdata = replay_buffer.sample().clone()
+                    #print(f'advantages: {subdata[("agents", "advantage")]}')
+                    
                     loss_vals = loss_module(subdata)
-
+                                        
                     loss_value = (
                         loss_vals["loss_objective"]
                         + loss_vals["loss_critic"]
                         + loss_vals["loss_entropy"]
                     )
 
-                    if n_epoch == args.update_epochs - 1:
-                        original_data_logprobs = subdata[
-                            ("agents", "sample_log_prob")
-                        ].clone()
-                        original_actions = subdata[("agents", "action")].clone()
-                        with torch.no_grad():
-                            updated_logits = model(subdata.clone())[
-                                ("agents", "logits")
-                            ]
-                            dist = torch.distributions.Categorical(
-                                logits=updated_logits
+                    #print(f'loss val: {loss_value}')
+                    if args.exp_name is not None:
+                        # estimate KL divergence
+                        # again based on https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py
+                        if n_epoch == args.update_epochs - 1:
+                            original_data_logprobs = subdata[
+                                ("agents", "sample_log_prob")
+                            ].clone()
+                            original_actions = subdata[("agents", "action")].clone()
+                            with torch.no_grad():
+                                updated_logits = model(subdata.clone())[
+                                    ("agents", "logits")
+                                ]
+                                dist = torch.distributions.Categorical(
+                                    logits=updated_logits
+                                )
+                                updated_data_logprobs = dist.log_prob(original_actions)
+                            logratio = updated_data_logprobs - original_data_logprobs
+                            approx_kl_minibatch[n_minibatch] = (
+                                (logratio.exp() - 1) - logratio
+                            ).mean()
+                            old_approx_kl_minibatch[n_minibatch] = (-logratio).mean()
+                            clip_frac[n_minibatch] = (
+                                ((logratio.exp() - 1.0).abs() > args.clip_coef)
+                                .float()
+                                .mean()
                             )
-                            updated_data_logprobs = dist.log_prob(original_actions)
-                        logratio = updated_data_logprobs - original_data_logprobs
-                        approx_kl_minibatch[n_minibatch] = (
-                            (logratio.exp() - 1) - logratio
-                        ).mean()
-                        old_approx_kl_minibatch[n_minibatch] = (-logratio).mean()
-                        clip_frac[n_minibatch] = (
-                            ((logratio.exp() - 1.0).abs() > args.clip_coef)
-                            .float()
-                            .mean()
-                        )
 
                     loss_value.backward()
 
@@ -544,16 +574,14 @@ if __name__ == "__main__":
 
                     optim.step()
                     optim.zero_grad()
-                    collector.update_policy_weights_()
 
-            print(f"last loss is: {loss_value}")
             training_duration = time.time() - training_start
 
             collector.update_policy_weights_()
 
             if args.exp_name is not None:
+                
                 loss_vals = loss_module(subdata)
-
                 loss_value = (
                     loss_vals["loss_objective"]
                     + loss_vals["loss_critic"]
@@ -613,7 +641,7 @@ if __name__ == "__main__":
                 )
                 writer.add_scalar("losses/clipfrac_max", clip_frac.max(), global_step)
 
-                if global_step % 50_000 == 0:
+                if (global_step/args.batch_size) % 10 == 0:
                     torch.save(
                         {
                             "model_state_dict": model.state_dict(),

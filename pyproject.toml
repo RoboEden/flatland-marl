@@ -30,8 +30,14 @@ optuna = "^3.4.0"
 dashboard = "^0.0.6"
 torchrl = "^0.2.1"
 docopt = "^0.6.2"
+pytest = "^7.4.4"
 
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "."
+]

@@ -6,7 +6,6 @@ poetry run python flatland_ppo_training_torchrl.py  \
 --max-grad-norm 0.1 \
 --learning-rate 2.5e-4 \
 --clip-coef 0.1 \
---seed 3 \
---track  \
+--seed 5 \
 --exp-name "two_agents_no_deadlocks_regularized_run_bs_8000" \
 --curriculum-path "curriculums/1_1_two_agents_no_deadlocks.json"

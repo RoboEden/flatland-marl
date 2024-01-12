@@ -1,0 +1,9 @@
+[
+    {
+        "map_height": 25,
+        "map_width": 25,
+        "num_agents": 50,
+        "reward_coefs": None,
+        "total_timesteps": 100000000
+    }
+]

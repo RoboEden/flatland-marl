@@ -69,7 +69,6 @@ class embedding_net(nn.Module):
                 module.bias.data.zero_()
                 
     def forward(self, obs_td):
-
         batch_size, n_agents, num_nodes, _ = obs_td['node_attr'].shape
         #print(f'node attr shape: {obs_td["node_attr"].shape}')
         device = obs_td.device

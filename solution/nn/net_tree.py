@@ -111,7 +111,7 @@ class Network_td(nn.Module):
 
         return embedding, att_embedding
     
-    def forward(self, obs_td, actions):
+    def forward(self, obs_td: TensorDict, valid_actions) -> torch.Tensor:
         #agents_attr, forest, adjacency, node_order, edge_order
         #print('shape of node attr: {}'.format(obs_td['node_attr'].shape))
         batch_size, n_agents, num_nodes, _ = obs_td['node_attr'].shape
@@ -156,7 +156,7 @@ class Network_td(nn.Module):
         # define distribution over all actions for the moment
         # might be an idea to only do it for the available options
         #print('logits grad before inf: {}'.format(logits.requires_grad))
-        valid_actions = obs_td['valid_actions']
+        #valid_actions = obs_td['valid_actions']
         logits_copy = logits.clone()
         #print('logits before inf: {}'.format(logits))
         logits[~valid_actions] = float('-inf')
@@ -172,7 +172,7 @@ class Network_td(nn.Module):
         #print("shape of logits: {}".format(logits.shape))
         #print("logits taken from dist: {}".format(probs.logits))
         #logits = logits.numpy()
-        if not torch.count_nonzero(actions): # check if we already assigned actions or need to draw
+        # check if we already assigned actions or need to draw
             #print("drawing new action")
             #valid_actions = obs_td['valid_actions']
             #actions = dict()
@@ -191,24 +191,17 @@ class Network_td(nn.Module):
             #print('probs valid actions after zero: {}'.format(probs_valid_actions))
             #probs_valid_actions = Categorical(probs = probs_valid_actions)
             #print('probs valid actions: {}'.format(probs.probs))
-            try:
-                actions = probs.sample()
-            except Exception as e:
-                print(f'logits returned by network: {logits_copy}')
-                print('probs of dist: {}'.format(probs.probs))
-                print("logits taken from dist: {}".format(probs.logits))
-                print('valid_actions: {}'.format(valid_actions))
-                for param in self.actor_net.parameters():
-                    print('param weights: {}'.format(param.data))
-                    print('grad: {}'.format(param.grad))
-                exit()
-                
-            #actions=obs_td['shortest_path_action']
-        else:
-            #print("used old actions")
-            #probs_valid_actions = torch.ones_like(obs_td['valid_actions'])
-            #probs_valid_actions = Categorical(probs = probs_valid_actions)
-            pass
+        try:
+            actions = probs.sample()
+        except Exception as e:
+            print(f'logits returned by network: {logits_copy}')
+            print('probs of dist: {}'.format(probs.probs))
+            print("logits taken from dist: {}".format(probs.logits))
+            print('valid_actions: {}'.format(valid_actions))
+            for param in self.actor_net.parameters():
+                print('param weights: {}'.format(param.data))
+                print('grad: {}'.format(param.grad))
+            exit()
             
         #actions_dict = {handle: action for handle, action in enumerate(actions)}
         #print('action before return: {}'.format(actions))
@@ -246,7 +239,7 @@ class Network_td(nn.Module):
         #print("log probs in net before return: {}".format(probs.log_prob(actions.squeeze(-1)).unsqueeze(-1)))        
         #return actions, probs.log_prob(actions.squeeze(-1)).unsqueeze(-1), entropy, values, probs.probs, tree_embedding
         assert(not torch.isnan(probs.log_prob(actions)).any(), "NA in action logits")
-        return actions, probs.log_prob(actions), entropy.mean(1).view(-1), values, probs.probs, tree_embedding 
+        return logits
         #return self.actor(embedding, att_embedding), self.critic(embedding, att_embedding)
     
     def actor(self, embedding, att_embedding):

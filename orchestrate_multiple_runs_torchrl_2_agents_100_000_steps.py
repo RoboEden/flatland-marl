@@ -6,7 +6,7 @@ from cleanrl_utils.tuner import Tuner
 
 tuner = Tuner(
     script="flatland_ppo_training_torchrl.py",
-    metric="stats/on_time_arrival_ratio",
+    metric="stats/arrival_ratio",
     metric_last_n_average_window=50,
     direction="maximize",
     aggregation_type="average",
@@ -14,7 +14,7 @@ tuner = Tuner(
         "flatland": None,
     },
     params_fn=lambda trial: {
-        "learning-rate": trial.suggest_float("learning-rate", 2.5e-7, 2.5e-2, log=True),
+        "learning-rate": trial.suggest_float("learning-rate", 2.5e-6, 2.5e-3, log=True),
         "num-minibatches": trial.suggest_categorical("num-minibatches", [1, 10, 100]),
         "update-epochs": trial.suggest_categorical("update-epochs", [1, 2, 4, 8, 16]),
         "num-steps": trial.suggest_categorical("num-steps", [10, 50, 100, 200, 500, 1000]),
