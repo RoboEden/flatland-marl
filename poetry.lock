@@ -2922,6 +2922,18 @@ tests = ["pytest", "pytest-instafail", "pyyaml", "scipy"]
 utils = ["git", "hydra-core (>=1.1)", "hydra-submitit-launcher", "tensorboard", "tqdm", "wandb"]
 
 [[package]]
+name = "torchsummary"
+version = "1.5.1"
+description = "Model summary in PyTorch similar to `model.summary()` in Keras"
+category = "main"
+optional = false
+python-versions = "*"
+files = [
+    {file = "torchsummary-1.5.1-py3-none-any.whl", hash = "sha256:10f41d1743fb918f83293f13183f532ab1bb8f6639a1b89e5f8592ec1919a976"},
+    {file = "torchsummary-1.5.1.tar.gz", hash = "sha256:981bf689e22e0cf7f95c746002f20a24ad26aa6b9d861134a14bc6ce92230590"},
+]
+
+[[package]]
 name = "tornado"
 version = "6.4"
 description = "Tornado is a Python web framework and asynchronous networking library, originally developed at FriendFeed."
@@ -3134,4 +3146,4 @@ test = ["pytest (>=6.0.0)", "setuptools (>=65)"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.11"
-content-hash = "1ed1471c4fbbd2626cb68f6c7a2d99b1f943947af9380d4ed449045861fcad4d"
+content-hash = "4df07a54b04c9fcf926ea15e0e290f3d3f0a902c71fff9e34e2276261d1ae071"

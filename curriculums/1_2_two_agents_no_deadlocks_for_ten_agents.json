@@ -8,7 +8,7 @@
         "shortest_path_reward_coef": 0,
         "departure_reward_coef": 0,
         "deadlock_penalty_coef": 0,
-        "arrival_delay_penalty_coef": 1
+        "arrival_delay_penalty_coef": 1,
         "total_timesteps": 10000000
     }
 ]

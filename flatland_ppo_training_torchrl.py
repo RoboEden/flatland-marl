@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from flatland.envs.line_generators import SparseLineGen
 from flatland.envs.rail_generators import SparseRailGen
+from flatland.envs.rail_generators import rail_from_grid_transition_map
+
 from flatland.envs.malfunction_generators import (
     MalfunctionParameters,
     ParamMalfunctionGen,
@@ -25,7 +27,8 @@ from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
 from torchrl.data.replay_buffers.storages import LazyTensorStorage
 from torchrl.envs import ParallelEnv, SerialEnv
 from torchrl.modules import ProbabilisticActor
-from torchrl.objectives import ClipPPOLoss
+from torchrl.objectives import ClipPPOLoss, ValueEstimators
+from torchrl.objectives.value import GAE
 from torchrl.modules import ActorValueOperator, ValueOperator
 from torchrl.data import TensorDictReplayBuffer
 
@@ -33,6 +36,9 @@ from flatland_cutils import TreeObsForRailEnv as TreeCutils
 from solution.nn.net_tree_torchrl import actor_net, critic_net, embedding_net
 from solution.nn.net_tree_transformer import transformer_embedding_net
 from flatland_torchrl.torchrl_rail_env import TorchRLRailEnv, TDRailEnv
+from flatland_torchrl.custom_map_generator import generate_custom_rail
+
+from torchsummary import summary
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -145,6 +151,9 @@ def parse_args():
     
     parser.add_argument('--do-multisync', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--use-transformer-embedding', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--zero-tree-attributes', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--value-loss', type=str, default='smooth_l1')
+    parser.add_argument('--map-name', type=str, default=None)
     args = parser.parse_args()
 
     return args
@@ -217,6 +226,7 @@ if __name__ == "__main__":
 
     model = ActorValueOperator(common_module, policy, critic_module).to(device)
 
+    #print(f'model summary: {(model)}')
     if args.pretrained_network_path is not None:
         model_path = args.pretrained_network_path
         assert model_path.endswith("tar"), "Network format not known."
@@ -233,7 +243,7 @@ if __name__ == "__main__":
         clip_epsilon=args.clip_coef,
         entropy_coef=args.ent_coef,
         normalize_advantage=args.norm_adv,  
-        loss_critic_type="smooth_l1",
+        loss_critic_type=args.value_loss,
     )
 
     loss_module.set_keys(
@@ -248,12 +258,28 @@ if __name__ == "__main__":
     optim = torch.optim.Adam(
         loss_module.parameters(), lr=args.learning_rate, weight_decay=1e-7
     )
-
+    
+    if args.zero_tree_attributes:
+        print(f'freeze trees')
+        for param in common_module.tree_lstm.parameters():
+            param.data = torch.zeros_like(param.data)
+            param.requires_grad = False # freeze
     global_step = 0
+    
+    for param in common_module.tree_lstm.parameters():
+        print(param.requires_grad)
 
-    
+    print(f'\n \n Number of Parameters:\n')
+    print(f'{"attr embedding:":<15} {sum(p.numel() for p in common_module.attr_embedding.parameters() if p.requires_grad):>10,}')
+    print(f'{"tree embedding:":<15} {sum(p.numel() for p in common_module.tree_lstm.parameters() if p.requires_grad):>10,}')
+    print(f'{"transformer:":<15} {sum(p.numel() for p in common_module.transformer.parameters() if p.requires_grad):>10,}')
+    print(f'{"policy net:":<15} {sum(p.numel() for p in model.get_policy_head().parameters() if p.requires_grad):>10,}')
+    print(f'{"value net:":<15} {sum(p.numel() for p in model.get_value_head().parameters() if p.requires_grad):>10,}')
+    print(f'{"total:":<15} {sum(p.numel() for p in model.parameters() if p.requires_grad):>10,}')    
+
+    print(f'\n \n')
+    #exit()
     # load learning curriculum 
-    
     if args.curriculum_path is not None:
         curriculums = open(args.curriculum_path)
         curriculums = json.load(curriculums)
@@ -280,31 +306,56 @@ if __name__ == "__main__":
         print(f"minibatch size: {args.minibatch_size}")
         print(f"batch size: {args.batch_size}")
 
-        def make_env() -> TorchRLRailEnv:
-            """Generate a random rail environment"""
-            td_env = TDRailEnv(
-                number_of_agents=curriculum["num_agents"],
-                width=curriculum["map_width"],
-                height=curriculum["map_height"],
-                rail_generator=SparseRailGen(
-                    max_num_cities=3,
-                    grid_mode=False,
-                    max_rails_between_cities=2,
-                    max_rail_pairs_in_city=2,
-                ),
-                line_generator=SparseLineGen(speed_ratio_map={1.0: 1}),
-                malfunction_generator=ParamMalfunctionGen(
-                    MalfunctionParameters(
-                        malfunction_rate=1 / 4500, min_duration=20, max_duration=50
-                    )
-                ),
-                obs_builder_object=TreeCutils(31, 500),
-            )
+        if args.map_name is None:
+            def make_env() -> TorchRLRailEnv:
+                """Generate a random rail environment"""
+                td_env = TDRailEnv(
+                    number_of_agents=curriculum["num_agents"],
+                    width=curriculum["map_width"],
+                    height=curriculum["map_height"],
+                    rail_generator=SparseRailGen(
+                        max_num_cities=3,
+                        grid_mode=False,
+                        max_rails_between_cities=2,
+                        max_rail_pairs_in_city=2,
+                    ),
+                    line_generator=SparseLineGen(speed_ratio_map={1.0: 1}),
+                    malfunction_generator=ParamMalfunctionGen(
+                        MalfunctionParameters(
+                            malfunction_rate=1 / 4500, min_duration=20, max_duration=50
+                        )
+                    ),
+                    obs_builder_object=TreeCutils(31, 500),
+                )
 
-            td_env.set_reward_coef(curriculum['reward_coefs']
-            )
-            td_env.reset()
-            return TorchRLRailEnv(td_env)
+                td_env.set_reward_coef(curriculum['reward_coefs']
+                )
+                td_env.reset()
+                return TorchRLRailEnv(td_env)
+            
+        else:
+            def make_env() -> TorchRLRailEnv:
+                td_env = TDRailEnv(
+                    number_of_agents=curriculum["num_agents"],
+                    width=curriculum["map_width"],
+                    height=curriculum["map_height"],
+                    rail_generator=rail_from_grid_transition_map(*generate_custom_rail(map_name=args.map_name)),
+                    line_generator=SparseLineGen(
+                        speed_ratio_map={1.0: 1}, #0.5: '', 0.33: 1 / 4, 0.25: 1 / 4},
+                        seed = 1
+                    ),
+                    malfunction_generator=ParamMalfunctionGen(
+                        MalfunctionParameters(
+                            malfunction_rate=1 / 4500, min_duration=20, max_duration=50
+                        ),
+                    ),
+                    obs_builder_object=TreeCutils(31, 500),
+                )
+                td_env.set_reward_coef(curriculum['reward_coefs']
+                )
+                td_env.reset()
+                return TorchRLRailEnv(td_env)
+            
 
         
         if args.do_multisync:
@@ -348,14 +399,17 @@ if __name__ == "__main__":
         collector.update_policy_weights_()
         
         for i_batch, tensordict_data in enumerate(collector): #start training loops
-            if i_batch<3:
+            if args.do_multisync and i_batch<3:
                 print("warm up iteration")
                 continue
             rollout_duration = time.time() - start_rollout
             training_start = time.time()
-            print(f"duration rollout: {time.time()-start_time}")
+            #print(f"duration rollout: {time.time()-start_time}")
             global_step += args.batch_size
-            print(f"global step: {global_step}")
+            #print(f"global step: {global_step}")
+            
+            #print(f'actions: {tensordict_data[("agents", "action")]}')
+            #print(f'logits: {tensordict_data[("agents", "logits")]}')
             
             if False:
                 print(f'tensordict data: {tensordict_data}')
@@ -407,14 +461,16 @@ if __name__ == "__main__":
                 writer.add_scalar(
                     "charts/total_rollout_duration", rollout_duration, global_step
                 )
-                print(f'shape of final steps: {final_steps.shape}')
-                print(f'shape of td data: {tensordict_data[("next", "agents", "observation", "agents_attr")].shape}')
+                #print(f'shape of final steps: {final_steps.shape}')
+                #print(f'shape of td data: {tensordict_data[("next", "agents", "observation", "agents_attr")].shape}')
                 final_stats = tensordict_data[("next", "agents", "observation", "agents_attr")][final_steps][:,:,(6,41)].mean((0,1))
                 writer.add_scalar(
                     "stats/arrival_ratio",
                     final_stats[0],
                     global_step,
                 )
+                print(f'arrival ratio: {final_stats[0]}')
+                print(f'deadlock ratio: {final_stats[1]}')
                 writer.add_scalar(
                     "stats/deadlock_ratio",
                     final_stats[1],
@@ -460,7 +516,7 @@ if __name__ == "__main__":
             
             # Calculation of generalized advantage estimator
             # based on https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py
-            with torch.no_grad():
+            with torch.no_grad():                    
                 lastgaelam = torch.zeros(args.num_envs).to(device)
                 tensordict_data["advantage"] = torch.zeros_like(
                     tensordict_data["state_value"]
@@ -525,7 +581,7 @@ if __name__ == "__main__":
                 clip_frac = torch.zeros(args.num_minibatches)
             
             for n_epoch in range(args.update_epochs):
-                print(f"epoch nr: {n_epoch}")
+                #print(f"epoch nr: {n_epoch}")
                 for n_minibatch in range(args.num_minibatches):
                     subdata = replay_buffer.sample().clone()
                     #print(f'advantages: {subdata[("agents", "advantage")]}')

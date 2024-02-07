@@ -1,0 +1,11 @@
+poetry run python flatland_ppo_training_torchrl.py  \
+--num-envs 8 \
+--num-steps 1000  \
+--vf-coef 0.01  \
+--ent-coef 0 \
+--max-grad-norm 0.7 \
+--learning-rate 2.5e-4 \
+--seed 1 \
+--exp-name "single_agent_figure_eight_map" \
+--curriculum-path "curriculums/minimal_debugging_examples/0_2_single_agent_figure_eight_map.json" \
+--map-name "figure_eight"

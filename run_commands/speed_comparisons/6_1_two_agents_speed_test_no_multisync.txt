@@ -1,0 +1,10 @@
+poetry run python flatland_ppo_training_torchrl.py  \
+--num-envs 4 \
+--vf-coef 0.01  \
+--ent-coef 0.01 \
+--max-grad-norm 0.2 \
+--learning-rate 2.5e-4 \
+--clip-coef 0.2 \
+--seed 1 \
+--exp-name "6_1_two_agents_speed_test_no_multisync" \
+--curriculum-path "curriculums/speed_comparisons/6_1_two_agents_no_deadlocks.json"

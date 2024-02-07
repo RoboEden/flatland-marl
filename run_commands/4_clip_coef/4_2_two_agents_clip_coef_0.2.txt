@@ -1,0 +1,12 @@
+poetry run python flatland_ppo_training_torchrl.py  \
+--num-envs 8 \
+--num-steps 1000 \
+--vf-coef 0.01  \
+--ent-coef 0.01 \
+--max-grad-norm 0.1 \
+--learning-rate 2.5e-4 \
+--clip-coef 0.2 \
+--seed 3 \
+--track  \
+--exp-name "4_2_two_agents_clip_coef_0.2" \
+--curriculum-path "curriculums/clip_coef/4_1_two_agents_clip_coef.json"

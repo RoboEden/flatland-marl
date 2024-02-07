@@ -1,0 +1,12 @@
+poetry run python flatland_ppo_training_torchrl.py  \
+--num-envs 8 \
+--num-steps 1000  \
+--vf-coef 0.01  \
+--ent-coef 0.01 \
+--max-grad-norm 0.2 \
+--learning-rate 2.5e-6 \
+--clip-coef 0.1 \
+--seed 1 \
+--track  \
+--exp-name "ten_agents_no_deadlocks_regularized_run_bs_8000_clip_coef_0_1_long_run" \
+--curriculum-path "curriculums/1_3_adding_agents_sequentally_disc_reward.json"

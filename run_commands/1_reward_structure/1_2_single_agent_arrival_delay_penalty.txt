@@ -1,0 +1,10 @@
+poetry run python flatland_ppo_training_torchrl.py  \
+--num-envs 8 \
+--num-steps 1000  \
+--vf-coef 0.01  \
+--ent-coef 0 \
+--max-grad-norm 0.7 \
+--learning-rate 2.5e-4 \
+--seed 1 \
+--exp-name "1_2_single_agent_arrival_delay_penalty" \
+--curriculum-path "curriculums/reward_structure/1_2_single_agent_arrival_delay_penalty.json"

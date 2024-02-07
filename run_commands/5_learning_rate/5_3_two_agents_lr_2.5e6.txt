@@ -1,0 +1,12 @@
+poetry run python flatland_ppo_training_torchrl.py  \
+--num-envs 8 \
+--num-steps 1000 \
+--vf-coef 0.01  \
+--ent-coef 0.01 \
+--max-grad-norm 0.1 \
+--learning-rate 2.5e-6 \
+--clip-coef 0.1 \
+--seed 3 \
+--track  \
+--exp-name "5_3_two_agents_lr_2.5e6" \
+--curriculum-path "curriculums/learing_rate/5_1_two_agents_learning_rate.json"

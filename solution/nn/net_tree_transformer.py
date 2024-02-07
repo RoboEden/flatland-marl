@@ -43,7 +43,7 @@ class transformer_embedding_net(nn.Module):
 
     def __init__(self):
         super(transformer_embedding_net, self).__init__()
-        self.tree_lstm = TreeTransformer(fp.node_sz, 500, ns.tree_embedding_sz)
+        #self.tree_lstm = TreeTransformer(fp.node_sz, ns.tree_embedding_sz, ns.tree_embedding_sz, n_nodes = 31)
         self.attr_embedding = nn.Sequential(
             nn.Linear(fp.agent_attr, 2 * ns.hidden_sz),
             nn.GELU(),
@@ -53,6 +53,7 @@ class transformer_embedding_net(nn.Module):
             nn.GELU(),
             nn.Linear(2 * ns.hidden_sz, ns.hidden_sz),
             nn.GELU(),
+            nn.LayerNorm(ns.hidden_sz)
         )
         self.transformer = nn.Sequential(
             Transformer(ns.hidden_sz + ns.tree_embedding_sz, 4),
@@ -60,11 +61,13 @@ class transformer_embedding_net(nn.Module):
             Transformer(ns.hidden_sz + ns.tree_embedding_sz, 4),
         )
         self.apply(self._init_weights)
+        self.tree_lstm = TreeTransformer(fp.node_sz, ns.tree_embedding_sz, ns.tree_embedding_sz, n_nodes = 31)
+
         
         
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=0.1)
+            module.weight.data.normal_(mean=0.0, std=0.001)
             print("initialized weights")
             if module.bias is not None:
                 module.bias.data.zero_()
@@ -80,9 +83,14 @@ class transformer_embedding_net(nn.Module):
                                         adjacency, 
                                         obs_td['node_order'], 
                                         obs_td['edge_order'])
-        tree_embedding = tree_embedding.unflatten(0, (batch_size, n_agents, num_nodes))
-        tree_embedding = tree_embedding[:, :, 0, :]
+        """         print(f'tree embedding max: {tree_embedding.max()}')
+        print(f'tree embedding min: {tree_embedding.min()}')
+        print(f'tree embedding var: {tree_embedding.var()}') """
+        #tree_embedding = tree_embedding[:,:,0,:]
+        #print(f'tree embedding: {tree_embedding}')
+        #print(f'tree embedding shape: {tree_embedding.shape}')
         agent_attr_embedding = self.attr_embedding(obs_td['agents_attr'])
+        #print(f'agent embedding shape: {agent_attr_embedding.shape}')
         embedding = torch.cat([agent_attr_embedding, tree_embedding], dim=2)
         ## attention
         att_embedding = self.transformer(embedding)

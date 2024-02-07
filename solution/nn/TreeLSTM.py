@@ -68,7 +68,7 @@ class TreeLSTM(nn.Module):
         #adjacency_list = adjacency_list[index_list]
         #print('permuted adjacency: {}'.format(adjacency_list))
         # populate the h and c states respecting computation order
-        max_node_order = node_order.max()
+        #max_node_order = node_order.max()
         #print('type of max node order: {}'.format(type(max_node_order)))
         for n in range(node_order.max().item() + 1):
             self._run_lstm(n, h, c, forest, node_order, adjacency_list, edge_order)

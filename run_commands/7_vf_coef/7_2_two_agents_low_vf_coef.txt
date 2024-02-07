@@ -1,0 +1,10 @@
+poetry run python flatland_ppo_training_torchrl.py  \
+--num-envs 8 \
+--num-steps 1000  \
+--vf-coef 0.00001  \
+--ent-coef 0 \
+--max-grad-norm 0.1 \
+--learning-rate 2.5e-4 \
+--seed 1 \
+--exp-name "7_2_two_agents_low_vf_coef" \
+--curriculum-path "curriculums/hyperparameter_examples/2_1_two_agents_vf_coef.json"

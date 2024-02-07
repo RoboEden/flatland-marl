@@ -81,7 +81,12 @@ class embedding_net(nn.Module):
                                         obs_td['edge_order'])
         tree_embedding = tree_embedding.unflatten(0, (batch_size, n_agents, num_nodes))
         tree_embedding = tree_embedding[:, :, 0, :]
+        #print(f'tree embedding shape: {tree_embedding.shape}')
         agent_attr_embedding = self.attr_embedding(obs_td['agents_attr'])
+        #print(f'tree embedding max: {tree_embedding.max()}')
+        #print(f'tree embedding min: {tree_embedding.min()}')
+        #print(f'tree embedding var: {tree_embedding.var()}')
+        #print(f'agent embedding shape: {agent_attr_embedding.shape}')
         embedding = torch.cat([agent_attr_embedding, tree_embedding], dim=2)
         ## attention
         att_embedding = self.transformer(embedding)
