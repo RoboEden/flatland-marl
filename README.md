@@ -23,7 +23,7 @@ poetry install
 If the flatland installation didn't work directly, do it manually by running
 
 ```shell
-poetry install
+poetry run pip install flatland-rl
 ```
 
 The installation of the C-utils obersvation generator does not work via poetry, therefore you have to run it manually with
@@ -31,8 +31,6 @@ The installation of the C-utils obersvation generator does not work via poetry, 
 ```shell
 poetry run pip install ./flatland_cutils
 ```
-
-# The TorchRL Flatland Environment
 
 # Training
 
@@ -50,6 +48,8 @@ In order to try different rewards and reproduce the curriculum learning used in 
 | shortest_path_reward  | Once the train is allowed to depart, at each step give the difference between travel time on the shortest path and available  time (positive if the train would arrive early on the shortest path, and equal to delay reward if it were to arrive late) | none                                  |
 | deadlock_penalty      | Gives the defined value as negative penalty for each agent newly in a deadlock.                                                                                                                                                                         | deadlock penalty                      |
 | arrival_delay_penalty | Equal in value to the delay reward, but only returned once upon the agents arrival at the destination or end of episode.                                                                                                                                | none                                  |
+
+
 Note that penalties are defined as negative rewards, i.e. a deadlock penalty of 2.5 will result in a reward of -2.5 upon deadlock. 
 
 ## Hyperparameter Training
@@ -67,11 +67,6 @@ To compare different models to the pre-trained model from the original paper, th
 # Notes
 
 A couple of my notes are in notes.pdf. These are just my personal working notes, and I include them in case they might be useful to someone, whitout claim to completeness or correctness.
-
-# Sources
-
-The C-Utils observation generator and the LSTM network implementation stems from https://github.com/RoboEden/flatland-marl.
-This project aimed to create an open-source training setup for the above network.
 
 # Future of this Repo/Expectations
 

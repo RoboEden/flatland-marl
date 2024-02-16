@@ -176,5 +176,6 @@ model_checkpoints/
 trained_models/
 
 *.db
+cleanrl_hpopt.db
 
 videos/
