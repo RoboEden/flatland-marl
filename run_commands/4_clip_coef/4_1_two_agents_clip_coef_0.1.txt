@@ -7,6 +7,5 @@ poetry run python flatland_ppo_training_torchrl.py  \
 --learning-rate 2.5e-4 \
 --clip-coef 0.1 \
 --seed 3 \
---track  \
 --exp-name "4_1_two_agents_clip_coef_0.1" \
 --curriculum-path "curriculums/clip_coef/4_1_two_agents_clip_coef.json"

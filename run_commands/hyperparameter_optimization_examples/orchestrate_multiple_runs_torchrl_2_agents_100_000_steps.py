@@ -19,7 +19,7 @@ tuner = Tuner(
         "update-epochs": trial.suggest_categorical("update-epochs", [1, 2, 4, 8]),
         "num-steps": trial.suggest_categorical("num-steps", [50, 100, 200, 500, 1000]),
         "vf-coef": 0.01,
-        "ent-coef": 0.01, 
+        "ent-coef": 0.01,
         "clip-coef": trial.suggest_float("clip-coef", 0, 0.5),
         "max-grad-norm": trial.suggest_float("max-grad-norm", 0, 1),
         "total-timesteps": 100000,
@@ -32,13 +32,13 @@ tuner = Tuner(
         "shortest-path-reward-coef": 0,
         "departure-reward-coef": 0,
         "deadlock-penalty-coef": 5,
-        "arrival-delay-penalty-coef": 0
+        "arrival-delay-penalty-coef": 0,
     },
     pruner=optuna.pruners.MedianPruner(n_startup_trials=5),
     sampler=optuna.samplers.TPESampler(),
-    study_name="smaller_sample_space"
+    study_name="smaller_sample_space",
 )
-os.system('poetry env info')
+os.system("poetry env info")
 tuner.tune(
     num_trials=100,
     num_seeds=3,

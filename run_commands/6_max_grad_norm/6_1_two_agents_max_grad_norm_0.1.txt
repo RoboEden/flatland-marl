@@ -7,6 +7,5 @@ poetry run python flatland_ppo_training_torchrl.py  \
 --learning-rate 2.5e-4 \
 --clip-coef 0.1 \
 --seed 3 \
---track  \
 --exp-name "6_1_two_agents_max_grad_norm_0.1" \
 --curriculum-path "curriculums/learing_rate copy/6_1_two_agents_max_grad_norm.json"

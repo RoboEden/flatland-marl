@@ -99,28 +99,28 @@ if __name__ == "__main__":
         model_path = get_model_path(n_agents)
     else:
         model_path = args.model
-    actor = Actor(model_path) # load the network weights
+    actor = Actor(model_path)  # load the network weights
     print(f"Load actor from {model_path}")
 
     # create video writer
     if args.save_video is not None:
         video_writer = VideoWriter(args.save_video, args.fps)
 
-    #action_history = []
+    # action_history = []
     # start step loop
     obs = env_wrapper.reset()
 
     while True:
         va = env_wrapper.get_valid_actions()
         action = actor.get_actions(obs, va, n_agents)
-        #action_history.append(action)
+        # action_history.append(action)
         obs, all_rewards, done = env_wrapper.step(action)
-        #print('observations: {}'.format(obs))
-        #print('shape observations[0]: {}'.format(len(obs[0])))
-        #print('shape observations [1][0]: {}'.format(obs[1][0]))
-        #print('shape observations[1][1]: {}'.format(obs[1][1]))
-        #print('shape observations[1][2]: {}'.format(obs[1][2]))
-        #print('shape observations[1][3]: {}'.format(obs[1][3]))
+        # print('observations: {}'.format(obs))
+        # print('shape observations[0]: {}'.format(len(obs[0])))
+        # print('shape observations [1][0]: {}'.format(obs[1][0]))
+        # print('shape observations[1][1]: {}'.format(obs[1][1]))
+        # print('shape observations[1][2]: {}'.format(obs[1][2]))
+        # print('shape observations[1][3]: {}'.format(obs[1][3]))
         if args.render:
             debug_show(env_wrapper.env)
             sleep(1 / args.fps)
@@ -130,7 +130,7 @@ if __name__ == "__main__":
             video_writer.write(frame)
 
         if done["__all__"]:
-            print(f'env reward dict at end: {env_wrapper.env.rewards_dict.values()}')
+            print(f"env reward dict at end: {env_wrapper.env.rewards_dict.values()}")
             if args.save_video is not None:
                 video_writer.close()
                 print(f"Write video to {args.save_video}")
@@ -140,7 +140,7 @@ if __name__ == "__main__":
             print(f"NORM_REW: {norm_reward:.4f}")
             print(f"ARR_RATIO: {arrival_ratio*100:.2f}%")
             break
-        #break
-        
-    #print(pd.DataFrame(action_history).sum(axis = 0))
-    #pd.DataFrame(action_history).to_excel('action_history.xlsx')
+        # break
+
+    # print(pd.DataFrame(action_history).sum(axis = 0))
+    # pd.DataFrame(action_history).to_excel('action_history.xlsx')

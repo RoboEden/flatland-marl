@@ -1,6 +1,6 @@
 import sys
 from glob import glob
- 
+
 # Available at setup time due to pyproject.toml
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 from setuptools import setup
@@ -16,13 +16,14 @@ __version__ = "0.0.1"
 #   Sort input source files if you glob sources to ensure bit-for-bit
 
 ext_modules = [
-    Pybind11Extension("flatland_cutils",
+    Pybind11Extension(
+        "flatland_cutils",
         # ["src/main.cpp"],
         sorted(glob("src/*.cpp")),
         # Example: passing in the version to the compiled code
-        define_macros = [('VERSION_INFO', __version__)],
-        # extra_compile_args = ["-O0", "-g", "-ggdb3"], 
-        ),
+        define_macros=[("VERSION_INFO", __version__)],
+        # extra_compile_args = ["-O0", "-g", "-ggdb3"],
+    ),
 ]
 
 setup(

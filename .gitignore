@@ -176,3 +176,5 @@ model_checkpoints/
 trained_models/
 
 *.db
+
+videos/

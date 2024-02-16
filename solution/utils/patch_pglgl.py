@@ -174,6 +174,7 @@ def open_window(self):
 PGLGL.show = show
 PGLGL.open_window = open_window
 
+
 #### hack RenderLocal to draw lines between agent and targets
 def render_prediction(self, agent_handles, prediction_dict):
     self.render_line_between_agents_and_targets()

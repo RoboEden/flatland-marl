@@ -38,19 +38,19 @@ class TreeLSTM(nn.Module):
         Takes Tensors encoding node features, a tree node adjacency_list, and the order in which
         the tree processing should proceed in node_order and edge_order.
         """
-        #print('shape of forest in treelstm: {}'.format(forest.shape))
+        # print('shape of forest in treelstm: {}'.format(forest.shape))
         forest = forest.flatten(0, 2)
         adjacency_list = adjacency.flatten(0, 2)
         node_order = node_order.flatten(0, 2)
         edge_order = edge_order.flatten(0, 2)
-        #print('shape of forest in treelstm after flatten: {}'.format(forest.shape))
-        #print('node_order_shape after flatten: {}'.format(node_order.shape))
-        #print('unique elements in node order: {}'.format(node_order.unique().shape))
-        #print('shape of adjacency list: {}'.format(adjacency_list.shape))
-        #print('unique elements of adjacency list: {}'.format(adjacency_list.unique().shape))
+        # print('shape of forest in treelstm after flatten: {}'.format(forest.shape))
+        # print('node_order_shape after flatten: {}'.format(node_order.shape))
+        # print('unique elements in node order: {}'.format(node_order.unique().shape))
+        # print('shape of adjacency list: {}'.format(adjacency_list.shape))
+        # print('unique elements of adjacency list: {}'.format(adjacency_list.unique().shape))
         # Total number of nodes in every tree in the batch
         batch_size = node_order.shape[0]
-        #print('batch size: {}'.format(batch_size))
+        # print('batch size: {}'.format(batch_size))
 
         # Retrive device the model is currently loaded on to generate h, c, and h_sum result buffers
         device = next(self.parameters()).device
@@ -58,18 +58,18 @@ class TreeLSTM(nn.Module):
         # h and c states for every node in the batch
         h = torch.zeros(batch_size, self.out_features, device=device)
         c = torch.zeros(batch_size, self.out_features, device=device)
-        #print('flattened adjacency: {}'.format(adjacency_list))
-        
-        #adjacency_list[:, 2] = adjacency_list[:,2] * (-1)
-        #print('flattened adjacency list changed signs: {}'.format(adjacency_list))
-        #print('dim of flttened adjacency (adjacency list): {}'.format(adjacency_list.shape))
+        # print('flattened adjacency: {}'.format(adjacency_list))
+
+        # adjacency_list[:, 2] = adjacency_list[:,2] * (-1)
+        # print('flattened adjacency list changed signs: {}'.format(adjacency_list))
+        # print('dim of flttened adjacency (adjacency list): {}'.format(adjacency_list.shape))
         # adjacency_list = adjacency_list[np.random.permutation(adjacency_list.shape[0])] # random permutation across all observations
-        #index_list = list(itertools.chain(*[[i+2, i+1, i]for i in range(0, adjacency_list.shape[0], 3)]))
-        #adjacency_list = adjacency_list[index_list]
-        #print('permuted adjacency: {}'.format(adjacency_list))
+        # index_list = list(itertools.chain(*[[i+2, i+1, i]for i in range(0, adjacency_list.shape[0], 3)]))
+        # adjacency_list = adjacency_list[index_list]
+        # print('permuted adjacency: {}'.format(adjacency_list))
         # populate the h and c states respecting computation order
-        #max_node_order = node_order.max()
-        #print('type of max node order: {}'.format(type(max_node_order)))
+        # max_node_order = node_order.max()
+        # print('type of max node order: {}'.format(type(max_node_order)))
         for n in range(node_order.max().item() + 1):
             self._run_lstm(n, h, c, forest, node_order, adjacency_list, edge_order)
         return h
@@ -119,14 +119,14 @@ class TreeLSTM(nn.Module):
             # parent_indexes and child_indexes contain the integer indexes needed to index into
             # the feature and hidden state arrays to retrieve the data for those parent/child nodes.
             parent_indexes = adjacency_list[:, 0]
-            #print('parent_indexes: {}'.format(parent_indexes))
+            # print('parent_indexes: {}'.format(parent_indexes))
             child_indexes = adjacency_list[:, 1]
-            #print('child_indexes: {}'.format(child_indexes))
+            # print('child_indexes: {}'.format(child_indexes))
             # child_h and child_c are tensors of size e x 1
             child_h = h[child_indexes, :]
-            #print('size of child_h: {}'.format(child_h.shape))
+            # print('size of child_h: {}'.format(child_h.shape))
             child_c = c[child_indexes, :]
-            #print('size of child_c: {}'.format(child_c.shape))
+            # print('size of child_c: {}'.format(child_c.shape))
 
             # # Add child hidden states to parent offset locations
             # _, child_counts = torch.unique_consecutive(parent_indexes, return_counts=True)
@@ -138,13 +138,13 @@ class TreeLSTM(nn.Module):
             # h_sum = torch.stack(parent_list)
 
             i_dims = child_h.shape[0] // 3
-            #print('i_dims: {}'.format(i_dims))
+            # print('i_dims: {}'.format(i_dims))
             child_h_merge = child_h.unflatten(0, (i_dims, 3)).flatten(start_dim=1)
-            #print('child_h_merge_before_flatten: {}'.format(child_h_merge))
-            #child_h_merge = child_h_merge.flatten(start_dim=1)
-            #print('child h merge dim: {}'.format(child_h_merge.shape))
+            # print('child_h_merge_before_flatten: {}'.format(child_h_merge))
+            # child_h_merge = child_h_merge.flatten(start_dim=1)
+            # print('child h merge dim: {}'.format(child_h_merge.shape))
             # h_reduce = self.W_h(child_h_merge)
-            #print('x dim: {}'.format(x.shape))
+            # print('x dim: {}'.format(x.shape))
             iou = self.W_iou(x) + self.U_iou(child_h_merge)
 
         # i, o and u are tensors of size n x M
@@ -160,11 +160,11 @@ class TreeLSTM(nn.Module):
             c[node_mask, :] = i * u
         else:
             # f is a tensor of size e x M
-            #print('shape of features:{}'.format(features.shape))
-            #print('shape of parents indexes: {}'.format(parent_indexes.shape))
-            #print('shape of child indexes: {}'.format(child_indexes.shape))
+            # print('shape of features:{}'.format(features.shape))
+            # print('shape of parents indexes: {}'.format(parent_indexes.shape))
+            # print('shape of child indexes: {}'.format(child_indexes.shape))
             f = self.W_f(features[parent_indexes, :]) + self.U_f(child_h)
-            #print('shape of f: {}'.format(f.shape))            
+            # print('shape of f: {}'.format(f.shape))
             f = torch.sigmoid(f)
 
             # fc is a tensor of size e x M
@@ -175,17 +175,19 @@ class TreeLSTM(nn.Module):
             # parent_list = [item.sum(0) for item in parent_children]
 
             # c_sum = torch.stack(parent_list)
-            #print('fc before flattening: {}'.format(fc))
-            #print('fc_shape before flatten):{}'.format(fc.shape))
-            fc = fc.unflatten(0, (fc.shape[0] // 3, 3)).flatten(start_dim=1) # this is where we must 
-            #print('fc_shape after flatten:{}'.format(fc.shape))
+            # print('fc before flattening: {}'.format(fc))
+            # print('fc_shape before flatten):{}'.format(fc.shape))
+            fc = fc.unflatten(0, (fc.shape[0] // 3, 3)).flatten(
+                start_dim=1
+            )  # this is where we must
+            # print('fc_shape after flatten:{}'.format(fc.shape))
             c_reduce = self.W_c(fc)
-            #print('shape of node mask: {}'.format(node_mask.shape))
-            #print('max value of node m')
-            #print('shape of c: {}'.format(c.shape))
-            c[node_mask, :] = i * u + c_reduce # here we calculate the sum
-            #print('vector x: {}'.format(x))
-            #print('subset of feature vector: {}'.format(features[parent_indexes, :]))
-            #print('size of vector x: {}'.format(x.shape))
-            #print('size of subset of feature vector: {}'.format(features[parent_indexes, :].shape))
+            # print('shape of node mask: {}'.format(node_mask.shape))
+            # print('max value of node m')
+            # print('shape of c: {}'.format(c.shape))
+            c[node_mask, :] = i * u + c_reduce  # here we calculate the sum
+            # print('vector x: {}'.format(x))
+            # print('subset of feature vector: {}'.format(features[parent_indexes, :]))
+            # print('size of vector x: {}'.format(x.shape))
+            # print('size of subset of feature vector: {}'.format(features[parent_indexes, :].shape))
         h[node_mask, :] = o * torch.tanh(c[node_mask])

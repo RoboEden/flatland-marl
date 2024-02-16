@@ -73,6 +73,7 @@ from tqdm import tqdm
 
 from flatland_torchrl.torchrl_rail_env import TorchRLRailEnv, TDRailEnv
 
+
 def parse_args():
     # fmt: off
     parser = argparse.ArgumentParser()
@@ -94,7 +95,6 @@ def parse_args():
     parser.add_argument(
         "--fps", type=float, default=2, help="frames per second (default 10)"
     )
-    parser.add_argument("--render", action=argparse.BooleanOptionalAction)
     parser.add_argument("--video-path", type=str, default="videos/")
     args = parser.parse_args()
     # fmt: on
@@ -132,10 +132,7 @@ class TorchRLRailEnvRender(TorchRLRailEnv):
         )
         image = Image.fromarray(image_rbg.astype("uint8")).convert("RGB")
         image.save(
-            self.saving_directory
-            + "rollout_video_"
-            + str(self.step_nr)
-            + ".jpg"
+            self.saving_directory + "rollout_video_" + str(self.step_nr) + ".jpg"
         )
 
         self.step_nr += 1
@@ -148,17 +145,15 @@ if __name__ == "__main__":
     print(f"check if in venv: {sys.prefix == sys.base_prefix}")
     print(sys.argv)
     args = parse_args()
-    
+
     if args.do_render:
         saving_directory = "videos/"
         temp_directory = saving_directory + "temp/"
         os.mkdir(temp_directory)
-        print('made temp directory')
-    
+        print("made temp directory")
+
     if args.pretrained_network_path is not None:
-        pretrained_network_name = re.sub(
-            ".tar", "", args.pretrained_network_path
-        )
+        pretrained_network_name = re.sub(".tar", "", args.pretrained_network_path)
         pretrained_network_name = re.sub(".*/", "", pretrained_network_name)
     else:
         pretrained_network_name = ""
@@ -257,9 +252,10 @@ if __name__ == "__main__":
         model.load_state_dict(checkpoint["model_state_dict"])
         print("loaded pretrained model from .tar file")
         model.eval()
-        
-    if args.pretrained_network_path.endswith('.pt'):
+
+    if args.pretrained_network_path.endswith(".pt"):
         from solution.nn.net_tree import Network_td
+
         actor_net = Network_td()
         actor_net.load_state_dict(
             torch.load(args.pretrained_network_path, map_location=torch.device("cpu"))
@@ -284,7 +280,6 @@ if __name__ == "__main__":
             cache_dist=True,
             default_interaction_type=InteractionType.RANDOM,
         )
-        
 
     collector = SyncDataCollector(
         env,
@@ -316,11 +311,12 @@ if __name__ == "__main__":
         .sum(-1)
         .mean()
     ) """
-    print(f'shape of final steps: {final_steps.shape}')
-    print(f'results td shape: {results_td[("next", "agents", "observation", "agents_attr")].shape}')
-    final_stats = results_td[("next", "agents", "observation", "agents_attr")][final_steps][:,:,(6,41)].mean((0,1))
-    print(f'arrival ratio: {final_stats[0]}')
-    print(f'deadlock ratio: {final_stats[1]}')
-
-    
-
+    print(f"shape of final steps: {final_steps.shape}")
+    print(
+        f'results td shape: {results_td[("next", "agents", "observation", "agents_attr")].shape}'
+    )
+    final_stats = results_td[("next", "agents", "observation", "agents_attr")][
+        final_steps
+    ][:, :, (6, 41)].mean((0, 1))
+    print(f"arrival ratio: {final_stats[0]}")
+    print(f"deadlock ratio: {final_stats[1]}")
